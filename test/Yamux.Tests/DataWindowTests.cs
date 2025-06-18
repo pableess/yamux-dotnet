@@ -1,4 +1,4 @@
-﻿using FluentAssertions;
+﻿using AwesomeAssertions;
 using Yamux.Internal;
 
 namespace Yamux.Tests

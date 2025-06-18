@@ -3,17 +3,21 @@ Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
 VisualStudioVersion = 17.12.35527.113
 MinimumVisualStudioVersion = 10.0.40219.1
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Yamux", "Yamux\Yamux.csproj", "{A305FD82-0C71-4423-94FE-E8AABF498A45}"
-EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Yamux.Tests", "Yamux.Tests\Yamux.Tests.csproj", "{17233FBD-8C2F-4BC1-A4AE-C84B895A8EDA}"
-EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Yamux.Benchmark", "Yamux.Benchmark\Yamux.Benchmark.csproj", "{A4299DED-E2D0-4355-B1DD-73391A14D4CF}"
-EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "samples", "samples", "{35C4EF98-C91B-486C-AFBD-81BEA43EC2E5}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Sample", "samples\Sample\Sample.csproj", "{82FE32DE-30B6-416A-B069-80F07D16077A}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FileTransfer", "samples\FileTransfer\FileTransfer.csproj", "{85D22ECE-3DAD-4D0B-8130-C7193B2372B0}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Yamux", "src\Yamux\Yamux.csproj", "{B41C317D-7511-CB36-0576-8DD01A5DA7E8}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "test", "test", "{02EA681E-C7D8-13C7-8484-4AC65E1B71E8}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Yamux.Tests", "test\Yamux.Tests\Yamux.Tests.csproj", "{EDB8F4EB-4D96-7A5B-F374-FB7467EB4919}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "benchmark", "benchmark", "{ABECDF2D-F298-49AD-A15E-85C6EA3A8DB6}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Yamux.Benchmark", "benchmarks\Yamux.Benchmark\Yamux.Benchmark.csproj", "{30DFE48D-D223-167A-2BCC-96DE8F38EB6C}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -21,18 +25,6 @@ Global
 		Release|Any CPU = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(ProjectConfigurationPlatforms) = postSolution
-		{A305FD82-0C71-4423-94FE-E8AABF498A45}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
-		{A305FD82-0C71-4423-94FE-E8AABF498A45}.Debug|Any CPU.Build.0 = Debug|Any CPU
-		{A305FD82-0C71-4423-94FE-E8AABF498A45}.Release|Any CPU.ActiveCfg = Release|Any CPU
-		{A305FD82-0C71-4423-94FE-E8AABF498A45}.Release|Any CPU.Build.0 = Release|Any CPU
-		{17233FBD-8C2F-4BC1-A4AE-C84B895A8EDA}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
-		{17233FBD-8C2F-4BC1-A4AE-C84B895A8EDA}.Debug|Any CPU.Build.0 = Debug|Any CPU
-		{17233FBD-8C2F-4BC1-A4AE-C84B895A8EDA}.Release|Any CPU.ActiveCfg = Release|Any CPU
-		{17233FBD-8C2F-4BC1-A4AE-C84B895A8EDA}.Release|Any CPU.Build.0 = Release|Any CPU
-		{A4299DED-E2D0-4355-B1DD-73391A14D4CF}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
-		{A4299DED-E2D0-4355-B1DD-73391A14D4CF}.Debug|Any CPU.Build.0 = Debug|Any CPU
-		{A4299DED-E2D0-4355-B1DD-73391A14D4CF}.Release|Any CPU.ActiveCfg = Release|Any CPU
-		{A4299DED-E2D0-4355-B1DD-73391A14D4CF}.Release|Any CPU.Build.0 = Release|Any CPU
 		{82FE32DE-30B6-416A-B069-80F07D16077A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
 		{82FE32DE-30B6-416A-B069-80F07D16077A}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{82FE32DE-30B6-416A-B069-80F07D16077A}.Release|Any CPU.ActiveCfg = Release|Any CPU
@@ -41,6 +33,18 @@ Global
 		{85D22ECE-3DAD-4D0B-8130-C7193B2372B0}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{85D22ECE-3DAD-4D0B-8130-C7193B2372B0}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{85D22ECE-3DAD-4D0B-8130-C7193B2372B0}.Release|Any CPU.Build.0 = Release|Any CPU
+		{B41C317D-7511-CB36-0576-8DD01A5DA7E8}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B41C317D-7511-CB36-0576-8DD01A5DA7E8}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B41C317D-7511-CB36-0576-8DD01A5DA7E8}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B41C317D-7511-CB36-0576-8DD01A5DA7E8}.Release|Any CPU.Build.0 = Release|Any CPU
+		{EDB8F4EB-4D96-7A5B-F374-FB7467EB4919}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{EDB8F4EB-4D96-7A5B-F374-FB7467EB4919}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{EDB8F4EB-4D96-7A5B-F374-FB7467EB4919}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{EDB8F4EB-4D96-7A5B-F374-FB7467EB4919}.Release|Any CPU.Build.0 = Release|Any CPU
+		{30DFE48D-D223-167A-2BCC-96DE8F38EB6C}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{30DFE48D-D223-167A-2BCC-96DE8F38EB6C}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{30DFE48D-D223-167A-2BCC-96DE8F38EB6C}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{30DFE48D-D223-167A-2BCC-96DE8F38EB6C}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -48,6 +52,8 @@ Global
 	GlobalSection(NestedProjects) = preSolution
 		{82FE32DE-30B6-416A-B069-80F07D16077A} = {35C4EF98-C91B-486C-AFBD-81BEA43EC2E5}
 		{85D22ECE-3DAD-4D0B-8130-C7193B2372B0} = {35C4EF98-C91B-486C-AFBD-81BEA43EC2E5}
+		{EDB8F4EB-4D96-7A5B-F374-FB7467EB4919} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
+		{30DFE48D-D223-167A-2BCC-96DE8F38EB6C} = {ABECDF2D-F298-49AD-A15E-85C6EA3A8DB6}
 	EndGlobalSection
 	GlobalSection(ExtensibilityGlobals) = postSolution
 		SolutionGuid = {A47742C3-5963-489F-A1A2-D2A4F269BFE7}

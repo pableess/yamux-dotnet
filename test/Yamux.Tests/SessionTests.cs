@@ -1,14 +1,14 @@
-﻿using Nerdbank.Streams;
+﻿using AwesomeAssertions;
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using Nerdbank.Streams;
 using AutoBogus;
 using Yamux.Internal;
 using Bogus;
 using System.IO.Pipelines;
-using FluentAssertions;
 using System.Buffers;
 using System.ComponentModel.Design;
 using Bogus.DataSets;
@@ -96,7 +96,7 @@ namespace Yamux.Tests
             await Task.WhenAll(serverTask, clientTask);
 
             // assert the byte arrays are the same
-            buffer.ToArray().Should().Equal(result.ToArray());
+            result.ToArray().Should().BeEquivalentTo(buffer.ToArray());
         }
 
         [Fact]
@@ -190,8 +190,8 @@ namespace Yamux.Tests
             await Task.WhenAll(serverTask, clientTask);
 
             // assert the byte arrays are the same
-            buffer1.ToArray().Should().Equal(result1.ToArray());
-            buffer2.ToArray().Should().Equal(result2.ToArray());
+            result1.ToArray().Should().BeEquivalentTo(buffer1.ToArray());
+            result2.ToArray().Should().BeEquivalentTo(buffer2.ToArray());
         }
 
         [Fact]
@@ -300,7 +300,7 @@ namespace Yamux.Tests
             result.Should().NotBeNull();
 
             // assert the byte arrays are the same
-            buffer.ToArray().Should().Equal(result!.ToArray());
+            result!.ToArray().Should().BeEquivalentTo(buffer.ToArray());
         }
 
         [Fact]
