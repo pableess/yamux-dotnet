@@ -1,5 +1,4 @@
 name: Build and Publish NuGet Package
-
 on:
   push:
     branches:
@@ -42,4 +41,4 @@ jobs:
       - name: Publish to NuGet
         if: (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release') ||  startsWith(github.ref, 'refs/tags/v'))
         run: dotnet nuget push ./nupkg/*.nupkg ./nupkg/*.snupkg --api-key ${{ secrets.NUGET_API_KEY }}
-    run-name: Build and Publish NuGet Package v${{ env.VERSION }}
+    
