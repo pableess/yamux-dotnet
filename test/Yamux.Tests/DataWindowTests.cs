@@ -41,7 +41,7 @@ namespace Yamux.Tests
 
         [System.Diagnostics.CodeAnalysis.SuppressMessage("Usage", "xUnit1031:Do not use blocking task operations in test method", Justification = "Thread synchronization testing")]
         [Fact]
-        public void WaitConsumeTest_UnBlockedSuccess()
+        public async Task WaitConsumeTest_UnBlockedSuccess()
         {
             var dw = new RemoteDataWindow();
             dw.TryConsume(dw.Available);
@@ -57,7 +57,7 @@ namespace Yamux.Tests
 
             consumed.Should().Be(0);
             dw.Extend(24 * 1024);
-            task.Wait(100);
+            await task;
             consumed.Should().Be(24 * 1024);
         }
 
