@@ -10,7 +10,7 @@ namespace Yamux
     public static class StreamExtensions
     {
         /// <summary>
-        /// Craetes a yamux session from the raw stream
+        /// Creates a yamux session from the raw stream
         /// </summary>
         /// <param name="stream"></param>
         /// <returns></returns>

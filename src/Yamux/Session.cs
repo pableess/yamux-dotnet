@@ -16,6 +16,9 @@ namespace Yamux;
 /// A yamux session represents a multiplexed connection between two peers.  This can be used to create multiple logical streams over a single connection using the yamux protocol defined by hanshicorp.
 /// https://github.com/hashicorp/yamux/blob/master/spec.md
 /// </summary>
+/// <remarks>
+/// A Yamux session allows multiple logical streams over a single connection using the Yamux protocol.
+/// </remarks>
 public class Session : IChannelSessionAdapter, IDisposable,  IAsyncDisposable
 {
     private readonly static TraceSource SessionTracer = new TraceSource("Yamux.Session");

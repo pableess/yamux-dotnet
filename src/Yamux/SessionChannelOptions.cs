@@ -10,6 +10,12 @@ using Yamux.Protocol;
 
 namespace Yamux;
 
+/// <summary>
+/// Options for configuring a Yamux session channel.
+/// </summary>
+/// <remarks>
+/// Includes settings for window size, frame size, and automatic tuning.
+/// </remarks>
 public class SessionChannelOptions
 {
     public SessionChannelOptions() { }

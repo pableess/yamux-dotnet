@@ -10,12 +10,12 @@ namespace Yamux
     public enum SessionErrorCode 
     {
         /// <summary>
-        /// Invalid fram
+        /// Invalid frame
         /// </summary>
         InvalidVersion,
 
         /// <summary>
-        /// Invaid frame message type
+        /// Invalid frame message type
         /// </summary>
         InvalidMsgType,
 

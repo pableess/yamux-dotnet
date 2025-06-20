@@ -9,6 +9,12 @@ using System.Threading.Tasks;
 namespace Yamux
 {
     /// <summary>
+    /// Tracks bandwidth and byte statistics for a Yamux session.
+    /// </summary>
+    /// <remarks>
+    /// Provides methods to update and sample statistics.
+    /// </remarks>
+    /// <summary>
     /// Class to track the current send and receive bandwidth and the total bytes sent and received.
     /// </summary>
     public class Statistics : IDisposable
