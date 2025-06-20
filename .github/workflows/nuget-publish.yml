@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - release/**
     tags:
       - 'v*'
   pull_request:
@@ -28,6 +29,17 @@ jobs:
         run: dotnet test --no-build --configuration Release --verbosity normal
       - name: Pack
         run: dotnet pack src/Yamux/Yamux.csproj --no-build --configuration Release --output ./nupkg
+      - name: Set Version Variable
+        run: |
+          VERSION=$(grep '<VersionPrefix>' Directory.Build.props | sed -E 's/.*>(.*)<.*/\1/')-$(grep '<VersionSuffix>' Directory.Build.props | sed -E 's/.*>(.*)<.*/\1/')
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+
+      - name: Create Git Tag
+        if: (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release') ||  startsWith(github.ref, 'refs/tags/v'))
+        run: |
+          git tag v$VERSION
+          git push origin v$VERSION
       - name: Publish to NuGet
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release') ||  startsWith(github.ref, 'refs/tags/v'))
         run: dotnet nuget push ./nupkg/*.nupkg ./nupkg/*.snupkg --api-key ${{ secrets.NUGET_API_KEY }}
+    run-name: Build and Publish NuGet Package v${{ env.VERSION }}
