@@ -4,6 +4,10 @@
     <!-- TargetFramework moved to Directory.Build.props -->
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    
+    <!-- Package propertes -->
+    <PackageId>Yamux</PackageId>
+    <Description>.NET implementation of the Yamux multiplexing protocol.</Description>
   </PropertyGroup>
 
   <ItemGroup>

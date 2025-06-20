@@ -1,11 +1,9 @@
 <Project>
   <PropertyGroup>
     <TargetFramework>net9.0</TargetFramework>
-    <PackageId>Yamux</PackageId>
     <VersionPrefix>0.0.1</VersionPrefix>
     <VersionSuffix>beta1</VersionSuffix>
     <Authors>Paul Bleess</Authors>
-    <Description>.NET implementation of the Yamux multiplexing protocol.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <RepositoryUrl>https://github.com/pableess/yamux-dotnet</RepositoryUrl>
     <PackageProjectUrl>https://github.com/pableess/yamux-dotnet</PackageProjectUrl>
