@@ -11,8 +11,24 @@ namespace Yamux
     /// </summary>
     public enum ChannelErrorCode 
     {
+        /// <summary>
+        /// The peer has rejected the channel
+        /// </summary>
         ChannelRejected,
+
+        /// <summary>
+        /// Channel is half closed and data can no longer be sent on it
+        /// </summary>
+        ChannelWriteClosed,
+
+        /// <summary>
+        /// The channel is fully closed and no data can be sent or received
+        /// </summary>
         ChannelClosed,
+
+        /// <summary>
+        /// The underlying session transmission has been closed, so the channel is not operable anymore
+        /// </summary>
         SessionClosed,
     }
 

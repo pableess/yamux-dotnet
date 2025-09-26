@@ -1,13 +1,18 @@
 ﻿using ByteSizeLib;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Hosting.Internal;
 using Spectre.Console;
+using System;
+using System.CommandLine;
+using System.CommandLine.Invocation;
+using System.CommandLine.Parsing;
 using System.Diagnostics;
+using System.IO;
 using System.IO.Pipelines;
 using System.Net;
 using System.Net.Sockets;
-using System.Runtime.InteropServices.Marshalling;
-using System.Security.Cryptography;
+using System.Runtime.CompilerServices;
 using System.Threading.Channels;
 using Yamux;
 
@@ -15,227 +20,269 @@ namespace Sample
 {
     internal class Program
     {
-        static async Task Main(string[] args)
+        public static async Task Main(string[] args)
         {
-            var builder = Host.CreateApplicationBuilder();
+            // Ensure SessionTracer logs go to the console
+            //Yamux.Session.SessionTracer.Listeners.Clear();
+            //Yamux.Session.SessionTracer.Listeners.Add(new ConsoleTraceListener());
+            //Yamux.Session.SessionTracer.Switch.Level = SourceLevels.All;
 
-            if (args.Length > 0 && args[0] == "yamux")
+            var serverOption = new Option<bool>("--server");
+            serverOption.Description = "Run as server";
+            var streamsOption = new Option<int>("--streams");
+                streamsOption.Description = "the number of streams";
+                streamsOption.DefaultValueFactory = (res) => 10;
+
+            var rootCommand = new RootCommand("Yamux Sample Application")
             {
-                if (args.Length == 1)
+                serverOption,
+                streamsOption
+            };
+
+            rootCommand.SetAction(async (parseResult, cancel) =>
+            {   
+                int streams = parseResult.GetValue<int>(streamsOption);
+                bool isServer = parseResult.GetValue<bool>(serverOption);
+
+                
+                return await RunSample(isServer, streams);
+            });
+
+            await rootCommand.Parse(args).InvokeAsync();
+        }
+
+        private static async Task<int> RunSample(bool isServer, int streams) 
+        {
+            var host = Host.CreateApplicationBuilder(null);
+
+            try
+            {
+                if (isServer)
                 {
-                    builder.Services.AddHostedService<YamuxServer>();
+                    host.Services.AddHostedService<YamuxServer>();
                 }
                 else
                 {
-                    builder.Services.AddHostedService<YamuxClient>();
+                    host.Services.AddHostedService<YamuxClient>(sp => new YamuxClient(streams));
                 }
-            }
-            else
-            {
-                if (args.Length == 0)
-                {
 
-                    builder.Services.AddHostedService<Server>();
-                }
-                else
+                await host.Build().RunAsync();
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"An error occurred: {ex.Message}");
+                Console.WriteLine(ex.StackTrace);
+                return -1;
+            }
+        }
+
+    }
+
+    abstract class YamuxBase : BackgroundService
+    {
+        static byte[] buffer = new byte[1024 * 1024]; // 16 MiB buffer for each write operation
+        public YamuxBase()
+        {
+            new Random().NextBytes(buffer);
+        }
+
+        protected static async Task RunChannelAsync(ISessionChannel channel, LiveDisplayContext ctx, Table table, Dictionary<int, int> channelRows, CancellationToken stoppingToken)
+        {
+            void UpdateStats(object? obj, EventArgs? args)
+            {
+                lock (table)
                 {
-                    builder.Services.AddHostedService<Client>();
+                    if (!channelRows.ContainsKey((int)channel.Id))
+                    {
+                        table.AddRow(channel.Id.ToString(), channel.Stats?.SendRate.ToString() ?? "0");
+                        channelRows[(int)channel.Id] = table.Rows.Count - 1;
+                    }
+                    else
+                    {
+                        table.UpdateCell(channelRows[(int)channel.Id], 1, channel.Stats?.SendRate.ToString() ?? "0");
+                        table.UpdateCell(channelRows[(int)channel.Id], 2, channel.Stats?.ReceiveRate.ToString() ?? "0");
+                    }
                 }
             }
-            await builder.Build().RunAsync();
+
+            if (channel.Stats != null)
+            {
+                channel.Stats.Sampled += UpdateStats;
+            }
+
+            try
+            {
+                var writeChannel = channel as IWriteOnlySessionChannel;
+                var sendTask = writeChannel == null ? Task.CompletedTask
+                    : Task.Run(async () =>
+                    {
+                        try
+                        {
+                            while (!stoppingToken.IsCancellationRequested && !writeChannel.IsClosed)
+                            {
+                                await writeChannel.WriteAsync(buffer, stoppingToken);
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            AnsiConsole.MarkupLine($"[red]Channel {channel.Id} write error: {ex.Message}[/]");
+                        }
+                    });
+
+                var readChannel = channel as IReadOnlySessionChannel;
+                var receiveTask = readChannel == null ? Task.CompletedTask : Task.Run(async () =>
+                {
+                    while (!stoppingToken.IsCancellationRequested)
+                    {
+                        var result = await readChannel.Input.ReadAsync(stoppingToken);
+                        readChannel.Input.AdvanceTo(result.Buffer.End);
+                        if (result.IsCompleted || result.IsCanceled)
+                        {
+                            break;
+                        }
+                    }
+                });
+
+                await Task.WhenAll(sendTask, receiveTask);
+            }
+            finally
+            {
+                if (channel.Stats != null)
+                {
+                    channel.Stats.Sampled -= UpdateStats;
+                }
+            }
         }
     }
 
-    class YamuxClient : BackgroundService
+    class YamuxClient : YamuxBase
     {
+        private readonly int _streamCount;
+
+        public YamuxClient(int streamCount) : base()
+        {
+            _streamCount = streamCount;
+        }
+
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
             using Socket socket = new Socket(SocketType.Stream, ProtocolType.Tcp);
             await socket.ConnectAsync(new IPEndPoint(IPAddress.Loopback, 5000));
-            
-            using var link = new NetworkStream(socket);
 
-            using var session = link.AsYamuxSession(true, options: new SessionOptions { EnableStatistics = true, StatisticsSampleInterval = 1000, DefaultChannelOptions = new SessionChannelOptions { ReceiveWindowUpperBound = 8 *1024 * 1024 } });
+            using var link = new NetworkStream(socket);
+            await using var session = link.AsYamuxSession(true, options: new SessionOptions
+            {
+                EnableStatistics = true,
+                StatisticsSampleInterval = 1000,
+                DefaultChannelOptions = new SessionChannelOptions
+                {
+                    ReceiveWindowSize = 256 * 1024, // 256 KiB
+                    ReceiveWindowUpperBound = 16 * 1024 * 1024, // 16 MiB
+                    MaxDataFrameSize = 16 * 1024, // 16 KiB
+                    AutoTuneReceiveWindowSize = true,
+                    EnableStatistics = true,
+                    StatisticsSampleInterval = 1000
+                }
+            });
             session.Start();
 
-            await AnsiConsole.Status().StartAsync("Writing...", async ctx =>
-            {
+            var table = new Table();
+            table.AddColumn("Channel");
+            table.AddColumn("Upload Rate (bytes/sec)");
+            table.AddColumn("Download Rate (bytes/sec)");
 
+            var channelRows = new Dictionary<int, int>();
+
+
+            await AnsiConsole.Live(table).StartAsync(async ctx =>
+            {
                 if (session.Stats != null)
                 {
                     session.Stats.Sampled += (o, a) =>
                     {
-                        ctx.Status($"Upload {session.Stats?.SendRate} / sec");
+                        lock (table)
+                        {
+                            table.Caption($"Down {session.Stats?.ReceiveRate}/sec  Up {session.Stats?.SendRate}/sec  Total Download {new ByteSize(session.Stats!.TotalBytesReceived).ToString()} Total Upload {new ByteSize(session.Stats!.TotalBytesSent).ToString()} ");
+                        }
+                        ctx.Refresh();
                     };
                 }
 
-                var a = WriteChannelAsync(session, stoppingToken); 
-                var b = WriteChannelAsync(session, stoppingToken);
-                var c = WriteChannelAsync(session, stoppingToken);
-                var d = WriteChannelAsync(session, stoppingToken);
-                await Task.WhenAll(a, b, c, d);
+                // run concurrently streas for _streamCount number of streams
 
-                ctx.Status($"Done");
-            });
-        }
-
-        private static Task WriteChannelAsync(Session session, CancellationToken stoppingToken)
-        {
-            return Task.Run(async () =>
-            {
-                try
+                // run concurrently streams for _streamCount number of streams
+                var tasks = new List<Task>();
+                for (int i = 0; i < _streamCount; i++)
                 {
-                    var buffer = new byte[1024 * 1024].AsMemory();
-                    Random r = new Random();
-
-                    using var channel = await session.OpenChannelAsync();
-                    do
-                    {
-                        // write a random amount of bytes between 950KiB and 1MiB
-                        var slice = buffer.Slice(r.Next(1024 * 48, 1024 * 64));
-                        await channel.WriteAsync(slice, stoppingToken);
-
-                    } while (!stoppingToken.IsCancellationRequested);
+                    var channel = await session.OpenChannelAsync(false, stoppingToken);
+                    tasks.Add(RunChannelAsync(channel, ctx, table, channelRows, stoppingToken));
                 }
-                catch (OperationCanceledException) { }
+                await Task.WhenAll(tasks);
             });
         }
+
     }
 
-    class YamuxServer : BackgroundService 
+    class YamuxServer : YamuxBase
     {
+        public YamuxServer() : base()
+        {
+        }
+
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
             using Socket socket = new Socket(SocketType.Stream, ProtocolType.Tcp);
             socket.Bind(new IPEndPoint(IPAddress.Loopback, 5000));
-
             socket.Listen();
 
-            using var clientSocket = await socket.AcceptAsync();
+            using var clientSocket = await socket.AcceptAsync(stoppingToken);
             using var link = new NetworkStream(clientSocket);
-
-            using var session = link.AsYamuxSession(false, options: new SessionOptions { EnableStatistics = true, StatisticsSampleInterval = 1000, DefaultChannelOptions = new SessionChannelOptions { ReceiveWindowUpperBound = 8 * 1024 * 1024 } });
-            session.Start();
-            await AnsiConsole.Status().StartAsync("Reading...", async ctx =>
+            await using var session = link.AsYamuxSession(false, options: new SessionOptions
             {
+                EnableStatistics = true,
+                StatisticsSampleInterval = 1000,
+                DefaultChannelOptions = new SessionChannelOptions
+                {
+                    ReceiveWindowSize = 256 * 1024, // 256 KiB
+                    ReceiveWindowUpperBound = 16 * 1024 * 1024, // 16 MiB
+                    MaxDataFrameSize = 16 * 1024, // 16 KiB
+                    AutoTuneReceiveWindowSize = true,
+                    EnableStatistics = true,
+                    StatisticsSampleInterval = 1000
+                }
+            });
+            session.Start();
 
+            var table = new Table();
+            table.AddColumn("Channel");
+            table.AddColumn("Download Rate (bytes/sec)");
+            table.AddColumn("Upload Rate (bytes/sec)");
+
+            var channelRows = new Dictionary<int, int>();
+
+            await AnsiConsole.Live(table).StartAsync( async ctx =>
+            {
                 if (session.Stats != null)
                 {
                     session.Stats.Sampled += (o, a) =>
                     {
-                        ctx.Status($"Download {session.Stats?.ReceiveRate} / sec");
-                    };
-                }
-
-                var a = ReadChannelAsync(session, stoppingToken);
-                var b = ReadChannelAsync(session, stoppingToken);
-                var c = ReadChannelAsync(session, stoppingToken);
-                var d = ReadChannelAsync(session, stoppingToken);
-
-                await Task.WhenAll(a, b, c, d);
-
-                ctx.Status($"Done");
-            });
-        }
-
-        private static Task ReadChannelAsync(Session session, CancellationToken stoppingToken)
-        {
-            return Task.Run(async () => 
-            {
-                using var channel = await session.AcceptAsync();
-                try
-                {
-                    ReadResult read;
-                    do
-                    {
-                        read = await channel.Input.ReadAsync(stoppingToken);
-                        channel.Input.AdvanceTo(read.Buffer.End, read.Buffer.End);
-
-                    } while (!read.IsCanceled && !read.IsCompleted);
-
-                }
-                catch (OperationCanceledException) { }
-            });
-        }
-    }
-
-
-    class Client : BackgroundService
-    {
-        protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-        {
-            using Socket socket = new Socket(SocketType.Stream, ProtocolType.Tcp);
-            await socket.ConnectAsync(new IPEndPoint(IPAddress.Loopback, 5000));
-
-            using var link = new NetworkStream(socket);
-
-            await AnsiConsole.Status().StartAsync("Writing...", async ctx =>
-            {
-                long bytesWritten = 0;
-                long last = Stopwatch.GetTimestamp();
-                try
-                {
-                    var buffer = new byte[1024 * 1024].AsMemory();
-                    Random r = new Random();
-
-                    do
-                    {
-                        // write a random amount of bytes between 950KiB and 1MiB
-                        var slice = buffer.Slice(r.Next(1024 * 950, 1024 * 1024));
-                        await link.WriteAsync(slice, stoppingToken);
-                        bytesWritten += slice.Length;
-                        var current = Stopwatch.GetTimestamp();
-                        var dif = current - last;
-                        if (dif > TimeSpan.FromSeconds(3).Ticks)
+                        lock (table)
                         {
-                            var bytesPerSec = bytesWritten / TimeSpan.FromTicks(dif).TotalSeconds;
-                            ctx.Status($"Upload {ByteSize.FromBytes(bytesPerSec)} / sec");
-                            bytesWritten = 0;
-                            last = current;
+                            table.Caption($"Down {session.Stats?.ReceiveRate}/sec  Up {session.Stats?.SendRate}/sec ");
                         }
 
-                    } while (!stoppingToken.IsCancellationRequested);
+                        ctx.Refresh();
+                    };
                 }
-                catch (OperationCanceledException) { }
 
-                ctx.Status($"Done");
-            });
-        }
-    }
-
-    class Server : BackgroundService
-    {
-        protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-        {
-            using Socket socket = new Socket(SocketType.Stream, ProtocolType.Tcp);
-            socket.Bind(new IPEndPoint(IPAddress.Loopback, 5000));
-
-            socket.Listen();
-
-            using var clientSocket = await socket.AcceptAsync();
-            using var link = new NetworkStream(clientSocket);
-
-            await AnsiConsole.Status().StartAsync("Reading...", async ctx =>
-            {
-                long bytesRead = 0;
-
-                try
+                while (!stoppingToken.IsCancellationRequested)
                 {
-                    var buffer = new byte[1024 * 1024].AsMemory();
-                    do
-                    {
-                        var read = await link.ReadAsync(buffer, stoppingToken);
-                        bytesRead += read;
-
-                        var bytes = ByteSize.FromBytes(bytesRead);
-                        ctx.Status($"Downloaded {bytes}");
-
-                    } while (true);
-
+                    var channel = session.AcceptAsync(stoppingToken).Result;
+                    _ = RunChannelAsync(channel, ctx, table, channelRows, stoppingToken);;
                 }
-                catch (OperationCanceledException) { }
 
-                ctx.Status($"Done {ByteSize.FromBytes(bytesRead)}");
+                await session.DisposeAsync();
             });
         }
     }

@@ -12,12 +12,12 @@ namespace FileTransfer
 {
     internal class Program
     {
-        static async Task Main(string[] args)
+        static async Task<int> Main(string[] args)
         {
             var rootCommand = new RootCommand("File Transfer application");
 
             var serverCommand = new Command("server", "Runs the server");
-            serverCommand.SetHandler(async () => 
+            serverCommand.SetAction(async (parsedResult) => 
             {
                 using Socket socket = new Socket(SocketType.Stream, ProtocolType.Tcp);
                 socket.Bind(new IPEndPoint(IPAddress.Loopback, 5000));
@@ -27,7 +27,7 @@ namespace FileTransfer
                 using var clientSocket = await socket.AcceptAsync();
                 using var link = new NetworkStream(clientSocket);
                  
-                using var session = link.AsYamuxSession(false, options: new SessionOptions { EnableStatistics = true, StatisticsSampleInterval = 1000, DefaultChannelOptions = new SessionChannelOptions { ReceiveWindowUpperBound = 8 * 1024 * 1024 } });
+                await using var session = link.AsYamuxSession(false, options: new SessionOptions { EnableStatistics = true, StatisticsSampleInterval = 1000, DefaultChannelOptions = new SessionChannelOptions { ReceiveWindowUpperBound = 8 * 1024 * 1024 } });
                 session.Start();
 
                 await AnsiConsole.Status().StartAsync("Reading...", async ctx =>
@@ -76,20 +76,23 @@ namespace FileTransfer
 
             var clientCommand = new Command("client", "Runs the command");
             var dirOpt = new Option<DirectoryInfo?>(
-                   name: "--dir",
-                   description: "The directory to copy files from.");
-            dirOpt.IsRequired = true;
-            clientCommand.AddOption(dirOpt);
-
-
-            clientCommand.SetHandler(async (dir) =>
+                   name: "--dir")
             {
+                Description = "The directory to copy files from.",
+                Required = true
+            };
+            clientCommand.Add(dirOpt);
+
+
+            clientCommand.SetAction(async (parseResult, cancel) =>
+            {
+                var dir = parseResult.GetValue(dirOpt);
                 using Socket socket = new Socket(SocketType.Stream, ProtocolType.Tcp);
                 await socket.ConnectAsync(new IPEndPoint(IPAddress.Loopback, 5000));
 
                 using var link = new NetworkStream(socket);
 
-                using var session = link.AsYamuxSession(true, options: new SessionOptions { EnableStatistics = true, StatisticsSampleInterval = 1000, DefaultChannelOptions = new SessionChannelOptions { ReceiveWindowUpperBound = 8 * 1024 * 1024 } });
+                await using var session = link.AsYamuxSession(true, options: new SessionOptions { EnableStatistics = true, StatisticsSampleInterval = 1000, DefaultChannelOptions = new SessionChannelOptions { ReceiveWindowUpperBound = 8 * 1024 * 1024 } });
                 session.Start();
 
                 await AnsiConsole.Status().StartAsync("Writing...", async ctx =>
@@ -127,17 +130,70 @@ namespace FileTransfer
                                 }
                             }));
                         }
+                       
+                        clientCommand.SetAction(async (parseResult, cancel) =>
+                        {
+                            var dir = parseResult.GetValue(dirOpt);
+                            using Socket socket = new Socket(SocketType.Stream, ProtocolType.Tcp);
+                            await socket.ConnectAsync(new IPEndPoint(IPAddress.Loopback, 5000));
 
+                            using var link = new NetworkStream(socket);
+
+                            await using var session = link.AsYamuxSession(true, options: new SessionOptions { EnableStatistics = true, StatisticsSampleInterval = 1000, DefaultChannelOptions = new SessionChannelOptions { ReceiveWindowUpperBound = 8 * 1024 * 1024 } });
+                            session.Start();
+
+                            return await AnsiConsole.Status().StartAsync("Writing...", async ctx =>
+                            {
+                                if (session.Stats != null)
+                                {
+                                    session.Stats.Sampled += (o, a) =>
+                                    {
+                                        ctx.Status($"Upload {session.Stats?.ReceiveRate} / sec");
+                                    };
+                                }
+
+                                var files = dir?.GetFiles();
+
+                                var tasks = new List<Task>();
+
+                                if (files != null)
+                                {
+                                    foreach (var file in files)
+                                    {
+                                        var channel = await session.OpenChannelAsync();
+
+                                        tasks.Add(Task.Run(async () =>
+                                        {
+                                            try
+                                            {
+
+                                                await file.OpenRead().CopyToAsync(channel.AsStream());
+                                                await channel.CloseAsync();
+
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                Console.WriteLine(ex);
+                                            }
+                                        }));
+                                    }
+
+                                    await Task.WhenAll(tasks);
+                                }
+                                return 0;
+                            });
+                        });
                         await Task.WhenAll(tasks);
                     }
+                    return 0;
                 });
-            }, dirOpt);
+            });
 
-            rootCommand.AddCommand(serverCommand);
-            rootCommand.AddCommand(clientCommand);
+            rootCommand.Add(serverCommand);
+            rootCommand.Add(clientCommand);
 
-            await rootCommand.InvokeAsync(args);
-
+            await rootCommand.Parse(args).InvokeAsync();
+            return 0;
         }
     }
 }

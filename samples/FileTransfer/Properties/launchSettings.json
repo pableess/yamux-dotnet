@@ -1,10 +1,10 @@
 {
   "profiles": {
-    "server": {
+    "file-server": {
       "commandName": "Project",
       "commandLineArgs": "server"
     },
-    "client": {
+    "file-client": {
       "commandName": "Project",
       "commandLineArgs": "client --dir \"C:\\Users\\paulb\\Downloads\\Foo2\""
     }

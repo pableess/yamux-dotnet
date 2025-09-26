@@ -6,9 +6,12 @@ using System.Diagnostics;
 using System.IO;
 using System.IO.Pipelines;
 using System.Net.Sockets;
+using System.Runtime.CompilerServices;
 using System.Threading.Channels;
+using System.Threading.Tasks;
 using Yamux.Internal;
 using Yamux.Protocol;
+using static System.Runtime.InteropServices.JavaScript.JSType;
 
 namespace Yamux;
 
@@ -19,13 +22,15 @@ namespace Yamux;
 /// <remarks>
 /// A Yamux session allows multiple logical streams over a single connection using the Yamux protocol.
 /// </remarks>
-public class Session : IChannelSessionAdapter, IDisposable,  IAsyncDisposable
+public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
 {
-    private readonly static TraceSource SessionTracer = new TraceSource("Yamux.Session");
+    public readonly static TraceSource SessionTracer = new TraceSource("Yamux.Session");
 
     public enum State { Open, Closing, Closed, Faulted }
 
-    private readonly FrameFormatterBase _formatter;
+    private readonly ITransport _peer;
+    private readonly ConnectionReader _reader;
+    private readonly ConnectionWriter _writer;
     private readonly StreamIdGenerator _idGenerator;
     private readonly ConcurrentDictionary<uint, SessionChannel> _channels;
     private readonly ConcurrentDictionary<uint, TaskCompletionSource<long>> _pings;
@@ -33,13 +38,13 @@ public class Session : IChannelSessionAdapter, IDisposable,  IAsyncDisposable
     private readonly ConcurrentDictionary<uint, TaskCompletionSource<IDuplexSessionChannel>> _connects;
     private readonly Channel<SessionChannel> _acceptQueue;
 
+    private readonly CancellationTokenSource _readToken;
+
     private Task? _keepAlive;
     private bool _started;
     private bool _remoteGoAway;
     private readonly CancellationTokenSource _keepAliveToken;
-    private readonly CancellationTokenSource _readToken;
     private readonly SessionOptions _sessionOptions;
-    private SemaphoreSlim _closingLock;
     private volatile bool _disposed;
     uint pingId = 0;
 
@@ -49,10 +54,10 @@ public class Session : IChannelSessionAdapter, IDisposable,  IAsyncDisposable
     /// <param name="frameFormatter">the frame formatter</param>
     /// <param name="isClient">if this end of the session originated from the client side of the connection</param>
     /// <param name="options"></param>
-    internal Session(FrameFormatterBase frameFormatter, bool isClient, SessionOptions? options = null)
+    internal Session(ITransport connection, bool isClient, SessionOptions? options = null)
     {
         _sessionOptions = options ?? new SessionOptions();
-        _formatter = frameFormatter;
+        _peer = connection ?? throw new ArgumentNullException(nameof(connection));
         _idGenerator = new StreamIdGenerator(!isClient);
         _channels = new ConcurrentDictionary<uint, SessionChannel>();
         _connects = new ConcurrentDictionary<uint, TaskCompletionSource<IDuplexSessionChannel>>();
@@ -60,7 +65,12 @@ public class Session : IChannelSessionAdapter, IDisposable,  IAsyncDisposable
         _keepAliveToken = new CancellationTokenSource();
         _readToken = new CancellationTokenSource();
 
-        _closingLock = new SemaphoreSlim(1);
+        if (_sessionOptions.EnableStatistics)
+        {
+            this.Stats = new Statistics(_sessionOptions.StatisticsSampleInterval, _keepAliveToken.Token);
+        }
+        _reader = new ConnectionReader(_peer);
+        _writer = new ConnectionWriter(_peer, Stats);
 
         // accept the channel queue
         _acceptQueue = Channel.CreateBounded<SessionChannel>(new BoundedChannelOptions(_sessionOptions.AcceptBacklog)
@@ -68,11 +78,6 @@ public class Session : IChannelSessionAdapter, IDisposable,  IAsyncDisposable
             FullMode = BoundedChannelFullMode.Wait,
             SingleWriter = true,
         });
-
-        if (_sessionOptions.EnableStatistics)
-        {
-            this.Stats = new Statistics(_sessionOptions.StatisticsSampleInterval, _keepAliveToken.Token);
-        }
     }
 
     /// <summary>
@@ -191,7 +196,7 @@ public class Session : IChannelSessionAdapter, IDisposable,  IAsyncDisposable
     /// </summary>
     /// <param name="token"></param>
     /// <returns>RTT</returns>
-    public async Task<TimeSpan> PingAsync(CancellationToken cancellation)
+    public async ValueTask<TimeSpan> PingAsync(CancellationToken cancellation)
     {
         var opaqueValue = Interlocked.Increment(ref pingId);
 
@@ -206,7 +211,7 @@ public class Session : IChannelSessionAdapter, IDisposable,  IAsyncDisposable
         });
 
         var start = Stopwatch.GetTimestamp();
-        await _formatter.WritePingAsync(opaqueValue, cancellation);
+        await _writer.WriteAsync(Frame.CreatePingRequestFrame(opaqueValue), cancellation);
 
         _pings.TryAdd(opaqueValue, tcs);
 
@@ -228,7 +233,9 @@ public class Session : IChannelSessionAdapter, IDisposable,  IAsyncDisposable
         if (_started)
             return;
 
-        Run().ContinueWith(async t => 
+        _writer.Start();
+
+        ReadFrames().ContinueWith(async t => 
         {
             if (t.Exception != null) 
             {
@@ -251,18 +258,14 @@ public class Session : IChannelSessionAdapter, IDisposable,  IAsyncDisposable
 
     public Task CloseAsync() => this.CloseAsync(null);
 
-
-    private async Task CloseAsync(SessionException? err)
+    private async Task CloseAsync(SessionException? err = null)
     {
-        await _closingLock.WaitAsync();
-        using var release = new SemaphoreReleaser(_closingLock);
-
         if (!IsClosed)
         {
             try
             {
                 // send a go away frame to the remote peer, so that they will not create new streams
-                await _formatter.WriteGoAwayAsync(err?.GoAwayCode ?? SessionTermination.Normal, CancellationToken.None);
+                await _writer.WriteAsync(Frame.CreateGoAwayFrame(err?.GoAwayCode ?? SessionTermination.Normal), CancellationToken.None);
             }
             catch (Exception ex)
             {
@@ -278,49 +281,11 @@ public class Session : IChannelSessionAdapter, IDisposable,  IAsyncDisposable
 
                 _keepAliveToken.Dispose();
             }
-            CloseInternal(err);
+            await CloseInternal(err);
         }
     }
 
-    private void Close(SessionException? err)
-    {
-        _closingLock.Wait();
-        using var release = new SemaphoreReleaser(_closingLock);
-
-        if (!IsClosed)
-        {
-            // send a go away frame to the remote peer, so that they will not create new streams
-            try
-            {
-                _formatter.WriteGoAway(err?.GoAwayCode ?? SessionTermination.Normal);
-            }
-            catch (YamuxException ex)
-            {
-                SessionTracer.TraceInformation("[Warn] yamux: Unbable to send GoAway - {0}", ex.Message);
-            }
-
-            // shutdown keep alive loop
-            if (_keepAlive != null)
-            {
-                if (_keepAliveToken.IsCancellationRequested)
-                {
-                    _keepAliveToken.Dispose();
-                }
-                else
-                {
-                    _keepAlive.ContinueWith(t =>
-                    {
-                        _keepAliveToken.Dispose();
-                    });
-
-                    _keepAliveToken.Cancel();
-                }
-            }
-            CloseInternal(err);
-        }
-    }
-
-    private void CloseInternal(SessionException? err = null) 
+    private async ValueTask CloseInternal(SessionException? err = null) 
     {       
         _readToken.Cancel(); // shutdown read pump
         _acceptQueue.Writer.TryComplete(); // signal no more accepted channels
@@ -334,23 +299,16 @@ public class Session : IChannelSessionAdapter, IDisposable,  IAsyncDisposable
 
         var currentChannels = _channels.Values;
         _channels.Clear();
-        foreach (var c in currentChannels)
-        { 
-            c.ForceClose(err);
-        }
-    }
 
-    public void Dispose()
-    {
-        if (!_disposed)
+        if (currentChannels.Count > 0)
         {
-            _disposed = true;
-            Close(null);
-            _formatter.Dispose();
-            _closingLock.Dispose();
-
-            Stats?.Dispose();
-            Stats = null;
+            foreach (var c in currentChannels)
+            {
+                if (!c.IsClosed)
+                {
+                    await c.CloseAsync();
+                }
+            }
         }
     }
 
@@ -358,51 +316,40 @@ public class Session : IChannelSessionAdapter, IDisposable,  IAsyncDisposable
     {
         if (!_disposed)
         {
-            _disposed = true;
             await CloseAsync();
-            await _formatter.DisposeAsync();
-            _closingLock?.Dispose();
 
             Stats?.Dispose();
             Stats = null;
+
+            _disposed = true;
         }
     }
 
-    private async Task Run() 
+    private async Task ReadFrames() 
     {
-        while (!_readToken.IsCancellationRequested)
+        await foreach(var frameHeader in _reader.ReadFramesAsync(_readToken.Token))
         {
-            try
+            switch (frameHeader.FrameType)
             {
-                var frameHeader = await _formatter.ReadFrameHeaderAsync(_readToken.Token);
-
-                // TODO;
-                switch (frameHeader.FrameType)
-                {
-                    case FrameType.Data:
-                        await HandleDataFrame(frameHeader, _readToken.Token);
-                        break;
-                    case FrameType.WindowUpdate:
-                        await HandleWindowUpdateFrame(frameHeader, _readToken.Token);
-                        break;
-                    case FrameType.Ping:
-                        HandlePingFrame(frameHeader, _readToken.Token);
-                        break;
-                    case FrameType.GoAway:
-                        await HandleGoAway(frameHeader, _readToken.Token);
-                        break;
-                    default:
-                        throw new NotImplementedException();
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                // shutting down, ignore
+                case FrameType.Data:
+                    await HandleDataFrame(frameHeader, _readToken.Token);
+                    break;
+                case FrameType.WindowUpdate:
+                    await HandleWindowUpdateFrame(frameHeader, _readToken.Token);
+                    break;
+                case FrameType.Ping:
+                    HandlePingFrame(frameHeader, _readToken.Token);
+                    break;
+                case FrameType.GoAway:
+                    await HandleGoAway(frameHeader, _readToken.Token);
+                    break;
+                default:
+                    throw new NotImplementedException();
             }
         }
     }
 
-    private async ValueTask HandleGoAway(Yamux.Protocol.FrameFormatterBase.FrameHeader frameHeader, CancellationToken token)
+    private async ValueTask HandleGoAway(FrameHeader frameHeader, CancellationToken token)
     {
         // how to handle go away
         switch (frameHeader.Length)
@@ -423,7 +370,7 @@ public class Session : IChannelSessionAdapter, IDisposable,  IAsyncDisposable
         }
     }
 
-    private async Task HandleWindowUpdateFrame(Yamux.Protocol.FrameFormatterBase.FrameHeader frameHeader, CancellationToken token)
+    private async Task HandleWindowUpdateFrame(FrameHeader frameHeader, CancellationToken token)
     {
         // todo: handle stream frames
         var channel = await GetChannelAsync(frameHeader.StreamId, frameHeader.Flags, token);
@@ -437,33 +384,84 @@ public class Session : IChannelSessionAdapter, IDisposable,  IAsyncDisposable
 
         token.ThrowIfCancellationRequested();
 
-        channel.HandleWindowUpdate(frameHeader.Length, frameHeader.Flags);
+        channel.UpdateRemoteWindow(frameHeader.Length, frameHeader.Flags);
     }
 
-    private async Task HandleDataFrame(FrameFormatterBase.FrameHeader frameHeader, CancellationToken token)
+    private async Task HandleDataFrame(FrameHeader frameHeader, CancellationToken token)
     {
         var channel = await GetChannelAsync(frameHeader.StreamId, frameHeader.Flags, token);
 
-        Stats?.UpdateReceived(frameHeader.Length);
+        // fill the channel's pipe with the data
+        await ReadPayloadData(frameHeader.Length, channel, token);
+    }
 
-        if (channel != null)
+    /// <summary>
+    /// Read frame payload data from the connection and copys it to the channel's input pipe
+    /// </summary>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
+    private async ValueTask ReadPayloadData(uint payloadLength, SessionChannel? channel, CancellationToken cancellationToken)
+    {
+        int bytesToRead = (int)payloadLength;
+
+        // since closing the channel is not coordinated with locks, we need to handle the pipe being closed while we are writing to it
+        // this is why we track its state so that if it is closed during this operation we can continue discarding the rest of the frame data
+        bool pipeOpen = channel != null && !channel.IsClosed;
+        do
         {
-            await channel.HandleDataFrameAsync(frameHeader.Length, frameHeader.Flags, token);
-        }
-        else
-        {
-            // local channel has already been disposed, ie we probably sent a RST
-            var payloadLength = frameHeader.Length;
-            if (payloadLength > 0) 
+            if (pipeOpen && channel != null)
             {
-                //read an discard the frame 
+                try
+                {
+                    var pipeWriter = channel.GetPipeWriter();
+                    var buffer = pipeWriter.GetMemory();
+                                
+                    if (buffer.Length > bytesToRead)
+                    {
+                        buffer = buffer.Slice(0, bytesToRead);
+                    }
 
-                SessionTracer.TraceInformation($"[WARN] yamux: discarding data for stream {frameHeader.StreamId}");
+                    var read = await _reader.ReadFramePayloadAsync(buffer, cancellationToken);
 
-                using var buffer = MemoryPool<byte>.Shared.Rent((int)payloadLength);
-                await _formatter.ReadPayloadDataAsync(buffer.Memory, token);
+                    pipeWriter.Advance(read);
+
+                    bytesToRead -= read;
+
+                    var flushResult = await pipeWriter.FlushAsync(cancellationToken);
+
+                    // reader has indicated that it is complete, we should close the channel as well
+                    if (flushResult.IsCompleted)
+                    {
+                        // close the channel
+                        channel.CloseWrite();
+
+                        await pipeWriter.CompleteAsync();
+
+                    }
+                }
+                catch (InvalidOperationException)
+                {
+                    // the channel has been closed, we cannot write to it
+                    pipeOpen = false;
+                }
+
+                Stats?.UpdateReceived(payloadLength);
+                channel.Stats?.UpdateReceived(payloadLength);
             }
-        }
+            else 
+            {
+                SessionTracer.TraceInformation("[WARN] yamux: channel is closed, discarding data for stream {0}", channel?.Id ?? 0);
+
+                // if the channel has already been closed, then we should still read the session data for the rest of the frame and discard it
+                // the session is not corrupted
+                using var buffer = MemoryPool<byte>.Shared.Rent(4048);
+
+                var read = await _reader.ReadFramePayloadAsync(buffer.Memory, cancellationToken);
+                bytesToRead -= read;
+
+                Stats?.UpdateReceived(payloadLength);
+            }
+        } while (bytesToRead > 0);
     }
 
     private async ValueTask<SessionChannel?> GetChannelAsync(uint id, Flags flags, CancellationToken cancel)
@@ -487,7 +485,7 @@ public class Session : IChannelSessionAdapter, IDisposable,  IAsyncDisposable
         return null;
     }
 
-    private void HandlePingFrame(FrameFormatterBase.FrameHeader frameHeader, CancellationToken token)
+    private void HandlePingFrame(FrameHeader frameHeader, CancellationToken token)
     {
         if (frameHeader.Flags.HasFlag(Flags.ACK))
         {
@@ -501,7 +499,7 @@ public class Session : IChannelSessionAdapter, IDisposable,  IAsyncDisposable
         else 
         {
             // no need to block reading, send an ack for the ping from the remote party
-            _ = _formatter.WritePingAckAsync(frameHeader.Length, token);
+            _ = _writer.WriteAsync(Frame.CreatePingResponseFrame(frameHeader), token);
         }
     }
 
@@ -536,102 +534,10 @@ public class Session : IChannelSessionAdapter, IDisposable,  IAsyncDisposable
 
     #region channel adapter
 
-    async ValueTask IChannelSessionAdapter.WriteDataFrameAsync(uint streamId, Flags flags, ReadOnlyMemory<byte> payload, CancellationToken cancel)
-    {
-        try
-        {
-            Stats?.UpdateSent((uint)payload.Length);
-            await _formatter.WriteDataFrameAsync(streamId, flags, payload, cancel);
-        }
-        catch (SessionException ye)
-        {
-            await this.CloseAsync(ye);
-            throw;
-        }
-        catch (Exception)
-        {
-            await this.CloseAsync(new SessionException(SessionErrorCode.StreamError, SessionTermination.InternalError));
-            throw;
-        }
-    }
-
-    void IChannelSessionAdapter.WriteDataFrame(uint streamId, Flags flags, ReadOnlyMemory<byte> payload)
-    {
-        try
-        {
-            Stats?.UpdateSent((uint)payload.Length);
-            _formatter.WriteDataFrame(streamId, flags, payload);
-        }
-        catch (SessionException ye)
-        {
-            this.Close(ye);
-            throw;
-        }
-        catch (Exception)
-        {
-            this.Close(new SessionException(SessionErrorCode.StreamError, SessionTermination.InternalError));
-            throw;
-        }
-    }
-
-
-    async ValueTask IChannelSessionAdapter.WriteWindowUpdateFrameAsync(uint streamId, Flags flags, uint windowSizeIncrement, CancellationToken cancel)
-    {
-        try
-        {
-            await _formatter.WriteWindowUpdateFrameAsync(streamId, flags, windowSizeIncrement, cancel);
-        }
-        catch (SessionException ye) 
-        {
-            await this.CloseAsync(ye);
-            throw;
-        }
-        catch (Exception)
-        {
-            await this.CloseAsync(new SessionException(SessionErrorCode.StreamError, SessionTermination.InternalError));
-            throw;
-        }
-    }
-
-    void IChannelSessionAdapter.WriteWindowUpdateFrame(uint streamId, Flags flags, uint windowSizeIncrement)
-    {
-        try
-        {
-            _formatter.WriteWindowUpdateFrame(streamId, flags, windowSizeIncrement);
-        }
-        catch (SessionException ye)
-        {
-            this.Close(ye);
-        }
-        catch (Exception)
-        {
-            this.Close(new SessionException(SessionErrorCode.StreamError, SessionTermination.InternalError));
-        }
-    }
-
-    void IChannelSessionAdapter.Flush() => _formatter.Flush();
-
-    Task IChannelSessionAdapter.FlushAsync(CancellationToken cancel) => _formatter.FlushAsync(cancel);
-
-    async ValueTask<int> IChannelSessionAdapter.ReadPayloadDataAsync(System.Memory<byte> memory, System.Threading.CancellationToken cancel)
-    {
-        try
-        {
-            return await _formatter.ReadPayloadDataAsync(memory, cancel);
-        }
-        catch (SessionException ye)
-        {
-            await this.CloseAsync(ye);
-            throw;
-        }
-        catch (Exception)
-        {
-            await this.CloseAsync(new SessionException(SessionErrorCode.StreamError, SessionTermination.InternalError));
-            throw;
-        }
-       
-    }
-        
+    /// <summary>
+    /// Gets the connection writer, used to sequentially send frames to the remote peer.
+    /// </summary>
+    ConnectionWriter IChannelSessionAdapter.Writer => _writer;
 
     void IChannelSessionAdapter.ChannelDisconnect(SessionChannel channel)
     {
