@@ -1,5 +1,8 @@
 # Yamux.NET
 
+> This library is not yet production ready.  Use at your own risk.
+>
+
 Yamux.NET is a .NET 9 library implementing the [Yamux multiplexing protocol](https://github.com/hashicorp/yamux/blob/master/spec.md), enabling multiple reliable, ordered, and independent streams (channels) over a single underlying connection (such as TCP). This is useful for building high-performance network applications, tunneling, or protocols that require multiplexed communication.
 
 ## Features
