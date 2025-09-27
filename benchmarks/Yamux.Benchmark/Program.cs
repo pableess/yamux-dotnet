@@ -14,7 +14,7 @@ namespace Yamux.Benchmark
 
             //var config = DefaultConfig.Instance.AddJob(Job.MediumRun.WithLaunchCount(1).WithToolchain(InProcessEmitToolchain.Instance));
 
-            var summary = BenchmarkRunner.Run<Yamux>();
+            var summary = BenchmarkRunner.Run<LockBenchmark>();
         }
 
         //public class ThroughputColumn : IColumn
@@ -56,144 +56,149 @@ namespace Yamux.Benchmark
         //    }
         //}
 
-        [SimpleJob]
-        public class Yamux
-        {
-            Memory<byte> _buffer;
+        //[SimpleJob]
+        //public class Yamux
+        //{
+        //    Memory<byte> _buffer;
 
-            static int MBs = 50;
+        //    static int MBs = 50;
 
-            public Yamux()
-            {
-                Random r = new Random();
-                _buffer = new byte[1024 * 32];
-                r.NextBytes(_buffer.Span);
-            }
+        //    public Yamux()
+        //    {
+        //        Random r = new Random();
+        //        _buffer = new byte[1024 * 32];
+        //        r.NextBytes(_buffer.Span);
+        //    }
 
-            [Benchmark(Baseline = true)]
-            public async Task SocketBaselineAsync()
-            {
-                using Socket ss = new Socket(SocketType.Stream, ProtocolType.Tcp);
-                ss.Bind(new IPEndPoint(IPAddress.Loopback, 5000));
-                ss.Listen();
+        //    [Benchmark(Baseline = true)]
+        //    public async Task SocketBaselineAsync()
+        //    {
+        //        using Socket ss = new Socket(SocketType.Stream, ProtocolType.Tcp);
+        //        ss.Bind(new IPEndPoint(IPAddress.Loopback, 5000));
+        //        ss.Listen();
 
-                using Socket cs = new Socket(SocketType.Stream, ProtocolType.Tcp);
-                await cs.ConnectAsync(new IPEndPoint(IPAddress.Loopback, 5000));
-
-
-                var serverTask = Task.Run(async () =>
-                {
-                    using var ss1 = await ss.AcceptAsync();
-                    using Stream server = new NetworkStream(ss1);
-
-                    // every 32 iterations is a MB of data (in 32KB chunks)
-                    int iterations = MBs * 32;
-                    for (int i = 0; i < iterations; i++)
-                    {
-                        await server.WriteAsync(_buffer);
-                    }
-
-                    server.Close();
-                });
-
-                var clientTask = Task.Run(async () =>
-                {
-                    using Stream client = new NetworkStream(cs);
-
-                    byte[] readBuffer = new byte[1024 * 32];
-                    try
-                    {
-                        while (true)
-                            await client.ReadAtLeastAsync(readBuffer, 1024, throwOnEndOfStream: true);
-                    }
-                    catch (Exception)
-                    {
-                        // end of stream
-                    }
-                });
-
-                await Task.WhenAll(serverTask, clientTask);
-            }
-
-            [Benchmark]
-            public async Task YamuxSingleStreamAsync()
-            {
-                using Socket ss = new Socket(SocketType.Stream, ProtocolType.Tcp);
-                ss.Bind(new IPEndPoint(IPAddress.Loopback, 5001));
-                ss.Listen();
-
-                using Socket cs = new Socket(SocketType.Stream, ProtocolType.Tcp);
-                await cs.ConnectAsync(new IPEndPoint(IPAddress.Loopback, 5001));
+        //        using Socket cs = new Socket(SocketType.Stream, ProtocolType.Tcp);
+        //        await cs.ConnectAsync(new IPEndPoint(IPAddress.Loopback, 5000));
 
 
-                var serverTask = Task.Run(async () =>
-                {
-                    using var ss1 = await ss.AcceptAsync();
-                    using Stream server = new NetworkStream(ss1);
-                    using var session = server.AsYamuxSession(false);
-                    session.Start();
-                    using var channel = await session.OpenChannelAsync(false);
+        //        var serverTask = Task.Run(async () =>
+        //        {
+        //            using var ss1 = await ss.AcceptAsync();
+        //            using Stream server = new NetworkStream(ss1);
 
-                    // every 32 iterations is a MB of data (in 32KB chunks)
-                    int iterations = MBs * 32;
-                    for (int i = 0; i < iterations; i++)
-                    {
-                        await channel.WriteAsync(_buffer);
-                    }
+        //            // every 32 iterations is a MB of data (in 32KB chunks)
+        //            int iterations = MBs * 32;
+        //            for (int i = 0; i < iterations; i++)
+        //            {
+        //                await server.WriteAsync(_buffer);
+        //            }
 
-                    await channel.CloseAsync();
-                    await session.CloseAsync();
-                });
+        //            server.Close();
+        //        });
 
-                var clientTask = Task.Run(async () =>
-                {
-                    using Stream client = new NetworkStream(cs);
-                    var opt = new SessionOptions { DefaultChannelOptions = new SessionChannelOptions { 
-                        MaxDataFrameSize = 1024 * 64,
-                        ReceiveWindowSize = 1024 * 1024 * 51, 
-                        ReceiveWindowUpperBound = 1024 * 1024 * 51 } };
-                    using var session = client.AsYamuxSession(true, options: opt);
-                    session.Start();
-                    using var channel = await session.AcceptReadOnlyChannelAsync(null);
+        //        var clientTask = Task.Run(async () =>
+        //        {
+        //            using Stream client = new NetworkStream(cs);
 
-                    byte[] readBuffer = new byte[1024 * 32];
+        //            byte[] readBuffer = new byte[1024 * 32];
+        //            try
+        //            {
+        //                while (true)
+        //                    await client.ReadAtLeastAsync(readBuffer, 1024, throwOnEndOfStream: true);
+        //            }
+        //            catch (Exception)
+        //            {
+        //                // end of stream
+        //            }
+        //        });
 
-                    ReadResult res;
+        //        await Task.WhenAll(serverTask, clientTask);
+        //    }
 
-                    do
-                    {
-                        res = await channel.Input.ReadAtLeastAsync(1024);
-                        channel.Input.AdvanceTo(res.Buffer.End, res.Buffer.End);
-                    } while (!res.IsCompleted);
+        //    [Benchmark]
+        //    public async Task YamuxSingleStreamAsync()
+        //    {
+        //        using Socket ss = new Socket(SocketType.Stream, ProtocolType.Tcp);
+        //        ss.Bind(new IPEndPoint(IPAddress.Loopback, 5001));
+        //        ss.Listen();
 
-                    await channel.CloseAsync();
-                    await session.CloseAsync();
-                });
+        //        using Socket cs = new Socket(SocketType.Stream, ProtocolType.Tcp);
+        //        await cs.ConnectAsync(new IPEndPoint(IPAddress.Loopback, 5001));
 
-                await Task.WhenAll(serverTask, clientTask);
-            }
-        }
+
+        //        var serverTask = Task.Run(async () =>
+        //        {
+        //            using var ss1 = await ss.AcceptAsync();
+        //            using Stream server = new NetworkStream(ss1);
+        //            using var session = server.AsYamuxSession(false);
+        //            session.Start();
+        //            using var channel = await session.OpenChannelAsync(false);
+
+        //            // every 32 iterations is a MB of data (in 32KB chunks)
+        //            int iterations = MBs * 32;
+        //            for (int i = 0; i < iterations; i++)
+        //            {
+        //                await channel.WriteAsync(_buffer);
+        //            }
+
+        //            await channel.CloseAsync();
+        //            await session.CloseAsync();
+        //        });
+
+        //        var clientTask = Task.Run(async () =>
+        //        {
+        //            using Stream client = new NetworkStream(cs);
+        //            var opt = new SessionOptions { DefaultChannelOptions = new SessionChannelOptions { 
+        //                MaxDataFrameSize = 1024 * 64,
+        //                ReceiveWindowSize = 1024 * 1024 * 51, 
+        //                ReceiveWindowUpperBound = 1024 * 1024 * 51 } };
+        //            using var session = client.AsYamuxSession(true, options: opt);
+        //            session.Start();
+        //            using var channel = await session.AcceptReadOnlyChannelAsync(null);
+
+        //            byte[] readBuffer = new byte[1024 * 32];
+
+        //            ReadResult res;
+
+        //            do
+        //            {
+        //                res = await channel.Input.ReadAtLeastAsync(1024);
+        //                channel.Input.AdvanceTo(res.Buffer.End, res.Buffer.End);
+        //            } while (!res.IsCompleted);
+
+        //            await channel.CloseAsync();
+        //            await session.CloseAsync();
+        //        });
+
+        //        await Task.WhenAll(serverTask, clientTask);
+        //    }
+        //}
 
 
     }
 
     [SimpleJob]
+    [MemoryDiagnoser(true)]
     public class LockBenchmark
     {
         private readonly SemaphoreSlim _semaphore = new SemaphoreSlim(1);
         private readonly Lock _lock = new Lock();
+        private readonly DotNext.Threading.AsyncExclusiveLock _asyncLock = new DotNext.Threading.AsyncExclusiveLock();
 
 
         [Benchmark]
         public void SemaphoreSlimSync()
         {
-            try
+            foreach (var i in Enumerable.Range(0, 1000))
             {
-                _semaphore.Wait();
-            }
-            finally
-            {
-                _semaphore.Release();
+                try
+                {
+                    _semaphore.Wait();
+                }
+                finally
+                {
+                    _semaphore.Release();
+                }
             }
         }
 
@@ -201,29 +206,48 @@ namespace Yamux.Benchmark
         [Benchmark]
         public async Task SemaphoreSlimAsync()
         {
-            try
+            foreach (var i in Enumerable.Range(0, 1000))
             {
-                await _semaphore.WaitAsync();
-            }
-            finally
-            {
-                _semaphore.Release();
+                try
+                {
+                    await _semaphore.WaitAsync();
+                }
+                finally
+                {
+                    _semaphore.Release();
+                }
             }
         }
 
         [Benchmark]
         public void LockStatement()
         {
-            lock (_lock)
+            foreach (var i in Enumerable.Range(0, 1000))
             {
+                lock (_lock)
+                {
 
+                }
             }
         }
 
         [Benchmark]
         public void LockScope()
         {
-            using var l = _lock.EnterScope();
+            foreach (var i in Enumerable.Range(0, 1000))
+            {
+                using var l = _lock.EnterScope();
+            }
+        }
+
+        [Benchmark]
+        public async ValueTask AsyncExclusiveLockAsync()
+        {
+            foreach (var i in Enumerable.Range(0, 1000))
+            {
+                await _asyncLock.AcquireAsync();
+                _asyncLock.Release();
+            }
         }
     }
 }

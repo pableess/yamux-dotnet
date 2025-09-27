@@ -8,11 +8,11 @@
 
   <ItemGroup>
     <PackageReference Include="BenchmarkDotNet" Version="0.14.0" />
+    <PackageReference Include="DotNext.Threading" Version="5.23.0" />
     <PackageReference Include="Nerdbank.Streams" Version="2.11.79" />
   </ItemGroup>
 
-  <ItemGroup>    <ProjectReference Include="..\..\src\Yamux\Yamux.csproj" />
-
+  <ItemGroup>   
   </ItemGroup>
 
 </Project>

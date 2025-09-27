@@ -32,22 +32,21 @@ internal class ChannelStream : Stream
 
     public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
 
-    public override void Flush() => _outputChannel.FlushWrites();
+    public override void Flush() => throw new NotSupportedException();
 
     public override Task FlushAsync(CancellationToken cancellationToken) => _outputChannel.FlushWritesAsync(cancellationToken);
 
     public override long Seek(long offset, SeekOrigin origin)
     {
-        throw new NotImplementedException();
+        throw new NotSupportedException();
     }
 
     public override void SetLength(long value)
     {
-        throw new NotImplementedException();
+        throw new NotSupportedException();
     }
 
-    public override void Write(byte[] buffer, int offset, int count)
-        => _outputChannel.Write(new ReadOnlyMemory<byte>(buffer, offset, count));
+    public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
 
     public override Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
         => _outputChannel.WriteAsync(new ReadOnlyMemory<byte>(buffer, offset, count), cancellationToken).AsTask();

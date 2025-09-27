@@ -10,9 +10,4 @@ namespace Yamux.Protocol
     {
         public const uint Initial_Window_Size = 256 * 1024; // yamux specifies an intial window wize of 256KB
     }
-
-    internal class ErrorMsgs 
-    {
-
-    }
 }

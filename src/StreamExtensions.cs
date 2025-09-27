@@ -15,6 +15,6 @@ namespace Yamux
         /// <param name="stream"></param>
         /// <returns></returns>
         public static Session AsYamuxSession(this Stream stream, bool isClient, bool keepOpen = false, SessionOptions? options = null)
-            => new Session(new StreamFrameFormatter(stream, keepOpen), isClient, options);
+            => new Session(new StreamPeer(stream), isClient, options);
     }
 }

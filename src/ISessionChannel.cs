@@ -15,13 +15,18 @@ public interface ISessionChannel : IDisposable
     public uint Id { get; }
 
     /// <summary>
+    /// Gets if the channel has been fully closed
+    /// </summary>
+    public bool IsClosed { get; }
+
+    /// <summary>
     /// Fully closes the channel, waiting for the remote party to acknowledge the close if necessary
     /// </summary>
     /// <param name="timeout"></param>
     /// <param name="cancel"></param>
     /// <returns>A task that completes when the remote party has acknowledged the close</returns>
     /// <exception cref="InvalidOperationException"></exception>
-    public Task CloseAsync(TimeSpan? timeout = null, CancellationToken? cancel = null);
+    public ValueTask CloseAsync(TimeSpan? timeout = null, CancellationToken? cancel = null);
 
     /// <summary>
     /// Ensures that all written data is flushed in the underlying session connection
@@ -29,6 +34,11 @@ public interface ISessionChannel : IDisposable
     /// <param name="cancel"></param>
     /// <returns></returns>
     public Task FlushWritesAsync(CancellationToken? cancel);
+
+    /// <summary>
+    /// Gets the statistics for the channel, if statistics gathering is enabled
+    /// </summary>
+    public Statistics? Stats { get; }
 }
 
 public interface IWriteOnlySessionChannel : ISessionChannel

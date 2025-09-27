@@ -1,0 +1,12 @@
+{
+  "profiles": {
+    "server": {
+      "commandName": "Project",
+      "commandLineArgs": "--server"
+    },
+    "client": {
+      "commandName": "Project",
+      "commandLineArgs": "--streams 1"
+    }
+  }
+}

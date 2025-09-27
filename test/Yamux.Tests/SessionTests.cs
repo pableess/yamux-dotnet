@@ -37,7 +37,7 @@ namespace Yamux.Tests
             // try to open a stream from the client side and 
             var serverTask = Task.Run(async () =>
             {
-                using var serverSession = new Session(new StreamFrameFormatter(server), false);
+                await using var serverSession = new Session(new StreamPeer(server), false);
                 serverSession.Start();
 
                 using var channel = await serverSession.AcceptAsync();
@@ -68,7 +68,7 @@ namespace Yamux.Tests
 
             var clientTask = Task.Run(async () => 
             {
-                using var clientSession = new Session(new StreamFrameFormatter(client), true);
+                await using var clientSession = new Session(new StreamPeer(client), true);
                 clientSession.Start();
 
                 using var channel = await clientSession.OpenChannelAsync();
@@ -119,7 +119,7 @@ namespace Yamux.Tests
 
             var serverTask = Task.Run(async () =>
             {
-                using var serverSession = new Session(new StreamFrameFormatter(server), false);
+                await using var serverSession = new Session(new StreamPeer(server), false);
                 serverSession.Start();
 
                 async Task ReadChannelAsync(IReadOnlySessionChannel channel, Memory<byte> result)
@@ -156,7 +156,7 @@ namespace Yamux.Tests
 
             var clientTask = Task.Run(async () =>
             {
-                using var clientSession = new Session(new StreamFrameFormatter(client), true);
+                await using var clientSession = new Session(new StreamPeer(client), true);
                 clientSession.Start();
 
                 async Task SendOnChannelAsync(Memory<byte> buffer)
@@ -206,7 +206,7 @@ namespace Yamux.Tests
 
             var serverTask = Task.Run(async () =>
             {
-                using var serverSession = new Session(new StreamFrameFormatter(server), false);
+                await using var serverSession = new Session(new StreamPeer(server), false);
                 serverSession.Start();
                 using var channel = await serverSession.AcceptAsync();
 
@@ -227,7 +227,7 @@ namespace Yamux.Tests
 
             var clientTask = Task.Run(async () =>
             {
-                using var clientSession = new Session(new StreamFrameFormatter(client), true);
+                await using var clientSession = new Session(new StreamPeer(client), true);
                 clientSession.Start();
 
                 using var channel = await clientSession.OpenChannelAsync();
@@ -265,7 +265,7 @@ namespace Yamux.Tests
 
             var serverTask = Task.Run(async () =>
             {
-                using var serverSession = new Session(new StreamFrameFormatter(server), false);
+                await using var serverSession = new Session(new StreamPeer(server), false);
                 serverSession.Start();
                 using var channel = await serverSession.AcceptAsync();
                 using var stream = channel.AsStream();
@@ -280,7 +280,7 @@ namespace Yamux.Tests
 
             var clientTask = Task.Run(async () =>
             {
-                using var clientSession = new Session(new StreamFrameFormatter(client), true);
+                await using var clientSession = new Session(new StreamPeer(client), true);
                 clientSession.Start();
 
                 using var channel = await clientSession.OpenChannelAsync();
@@ -312,7 +312,7 @@ namespace Yamux.Tests
 
             var serverTask = Task.Run(async () =>
             {
-                using var serverSession = new Session(new StreamFrameFormatter(server), false);
+                await using var serverSession = new Session(new StreamPeer(server), false);
                 serverSession.Start();
                 using var channel = await serverSession.AcceptAsync();
 
@@ -336,7 +336,7 @@ namespace Yamux.Tests
 
             var clientTask = Task.Run(async () =>
             {
-                using var clientSession = new Session(new StreamFrameFormatter(client), true);
+                await using var clientSession = new Session(new StreamPeer(client), true);
                 clientSession.Start();
 
                 using var channel = await clientSession.OpenChannelAsync();
@@ -374,7 +374,7 @@ namespace Yamux.Tests
             {
                 using var ss1 = await ss.AcceptAsync();
                 using Stream server = new NetworkStream(ss1);
-                using var session = new Session(new StreamFrameFormatter(server), false, options: new SessionOptions { DefaultChannelOptions = new SessionChannelOptions { AutoTuneReceiveWindowSize = false, ReceiveWindowSize = uint.MaxValue } });
+                await using var session = new Session(new StreamPeer(server), false, options: new SessionOptions { DefaultChannelOptions = new SessionChannelOptions { AutoTuneReceiveWindowSize = false, ReceiveWindowSize = uint.MaxValue } });
                 session.Start();
                 using var channel = await session.OpenChannelAsync(false);
 
@@ -392,7 +392,7 @@ namespace Yamux.Tests
             var clientTask = Task.Run(async () =>
             {
                 using Stream client = new NetworkStream(cs);
-                using var session = new Session(new StreamFrameFormatter(client), true, options: new SessionOptions { DefaultChannelOptions = new SessionChannelOptions { AutoTuneReceiveWindowSize = false, ReceiveWindowSize = uint.MaxValue } });
+                await using var session = new Session(new StreamPeer(client), true, options: new SessionOptions { DefaultChannelOptions = new SessionChannelOptions { AutoTuneReceiveWindowSize = false, ReceiveWindowSize = uint.MaxValue } });
                 session.Start();
                 using var channel = await session.AcceptReadOnlyChannelAsync(null);
 
