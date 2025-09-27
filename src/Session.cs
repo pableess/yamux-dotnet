@@ -186,9 +186,16 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
     /// <returns></returns>
     private async ValueTask<IDuplexSessionChannel> AcceptChannelAsync(SessionChannelOptions channelOptions, CancellationToken? cancel = null)
     {
-        var channel = await _acceptQueue.Reader.ReadAsync(cancel ?? CancellationToken.None);
-        await channel.ApplyOptionsAsync(channelOptions, cancel ?? CancellationToken.None);
-        return channel;
+        try
+        {
+            var channel = await _acceptQueue.Reader.ReadAsync(cancel ?? CancellationToken.None);
+            await channel.ApplyOptionsAsync(channelOptions, cancel ?? CancellationToken.None);
+            return channel;
+        }
+        catch (ChannelClosedException)
+        {
+            throw new SessionException(SessionErrorCode.SessionShutdown, "Session has been closed");
+        }
     }
 
     /// <summary>
