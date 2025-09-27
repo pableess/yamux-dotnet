@@ -86,7 +86,7 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
     public TimeSpan? RTT { get; private set; }
 
     /// <summary>
-    /// Gets the statistics
+    /// Gets the statistics for the session if they are enabled in the options. Otherwise this will be null.
     /// </summary>
     public Statistics? Stats { get; private set; }
 
@@ -96,6 +96,7 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
     /// </summary>
     /// <param name="options"></param>
     /// <param name="cancel"></param>
+    /// <exception cref="SessionException">Session has been closed</exception>
     /// <returns></returns>
     public ValueTask<IDuplexSessionChannel> OpenChannelAsync(SessionChannelOptions options, bool waitForAcknowledgement = false, CancellationToken? cancel = null)
     {
@@ -148,6 +149,7 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
     /// </summary>
     /// <param name="waitForAcknowledgement"></param>
     /// <param name="cancel"></param>
+    /// <exception cref="SessionException">Session has been closed</exception>
     /// <returns></returns>
     public ValueTask<IDuplexSessionChannel> OpenChannelAsync(bool waitForAcknowledgement = false, CancellationToken? cancel = null) =>
         this.OpenChannelAsync(_sessionOptions.DefaultChannelOptions, waitForAcknowledgement, cancel);
@@ -157,6 +159,7 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
     /// Accepts a new channel using the default options
     /// </summary>
     /// <param name="cancel"></param>
+    /// <exception cref="SessionException">Session has been closed</exception>
     /// <returns></returns>
     public ValueTask<IDuplexSessionChannel> AcceptAsync(CancellationToken? cancel = null) => AcceptChannelAsync(_sessionOptions.DefaultChannelOptions, cancel);
 
@@ -164,6 +167,7 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
     /// Accepts a new session channel using the default options
     /// </summary>
     /// <param name="cancel"></param>
+    /// <exception cref="SessionException">Session has been closed</exception>
     /// <returns></returns>
     public ValueTask<IDuplexSessionChannel> AcceptAsync(SessionChannelOptions channelOptions, CancellationToken? cancel) => AcceptChannelAsync(_sessionOptions.DefaultChannelOptions, cancel);
 
@@ -171,6 +175,7 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
     /// Accepts a new channel with read only semantics
     /// </summary>
     /// <param name="cancel"></param>
+    /// <exception cref="SessionException">Session has been closed</exception>
     /// <returns></returns>
     public async ValueTask<IReadOnlySessionChannel> AcceptReadOnlyChannelAsync(CancellationToken? cancel)
     {
@@ -183,6 +188,7 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
     /// </summary>
     /// <param name="channelOptions"></param>
     /// <param name="cancel"></param>
+    /// <exception cref="SessionException">Session has been closed</exception>
     /// <returns></returns>
     private async ValueTask<IDuplexSessionChannel> AcceptChannelAsync(SessionChannelOptions channelOptions, CancellationToken? cancel = null)
     {
