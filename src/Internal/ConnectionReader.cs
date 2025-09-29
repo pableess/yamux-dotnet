@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Threading.Tasks;
@@ -23,11 +24,19 @@ namespace Yamux.Internal
         {
             byte[] headerBuffer = new byte[FrameHeader.FrameHeaderSize];
 
+            int bytesRead;
+
             while (!_stoppingToken.IsCancellationRequested)
             {
                 try
                 {
-                    await this.ReadAll(headerBuffer, cancel);
+                    bytesRead = await this.ReadAll(headerBuffer, cancel);
+
+                    if (bytesRead == 0)
+                    {
+                        // remote closed the connection
+                        throw new SessionException(SessionErrorCode.StreamClosed, "Connection closed by remote", SessionTermination.Normal);
+                    }
                 }
                 catch (OperationCanceledException)
                 {
@@ -39,7 +48,6 @@ namespace Yamux.Internal
                     yield return FrameHeader.Parse(headerBuffer);
                 }
             }
-
         }
 
         public async ValueTask<int> ReadFramePayloadAsync(Memory<byte> data, CancellationToken cancel)

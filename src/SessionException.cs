@@ -25,6 +25,16 @@ namespace Yamux
         SessionShutdown,
 
         /// <summary>
+        /// The remote peer is no longer acceepting new channels
+        /// </summary>
+        RemoteGoAway,
+
+        /// <summary>
+        /// This session is no longer accepting new channels
+        /// </summary>
+        LocalGoAway,
+
+        /// <summary>
         /// the maximum number of open channels has been reached
         /// </summary>
         StreamsExhausted,

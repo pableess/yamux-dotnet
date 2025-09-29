@@ -10,7 +10,7 @@ namespace Yamux
     /// <summary>
     /// Adapter interface for sending and receiving data to and from the yamux peer
     /// </summary>
-    public interface ITransport
+    public interface ITransport : IDisposable
     {
         /// <summary>
         /// Reads data from the peer copies it to the provided buffer

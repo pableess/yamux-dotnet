@@ -26,9 +26,11 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
 {
     public readonly static TraceSource SessionTracer = new TraceSource("Yamux.Session");
 
-    public enum State { Open, Closing, Closed, Faulted }
+    private SemaphoreSlim _closeLock = new SemaphoreSlim(1, 1);
 
-    private readonly ITransport _peer;
+    private Lock _stateLock = new Lock();
+
+    private readonly ITransport _transport;
     private readonly ConnectionReader _reader;
     private readonly ConnectionWriter _writer;
     private readonly StreamIdGenerator _idGenerator;
@@ -40,9 +42,15 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
 
     private readonly CancellationTokenSource _readToken;
 
+    private readonly bool _keepTransportOpenOnClose;
+
     private Task? _keepAlive;
+    private Task? _readLoop;
     private bool _started;
     private bool _remoteGoAway;
+    private bool _localGoAway;
+    private SessionTermination _goAwayError;
+
     private readonly CancellationTokenSource _keepAliveToken;
     private readonly SessionOptions _sessionOptions;
     private volatile bool _disposed;
@@ -54,10 +62,11 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
     /// <param name="frameFormatter">the frame formatter</param>
     /// <param name="isClient">if this end of the session originated from the client side of the connection</param>
     /// <param name="options"></param>
-    internal Session(ITransport connection, bool isClient, SessionOptions? options = null)
+    internal Session(ITransport connection, bool isClient, bool keepTransportOpenOnClose = false, SessionOptions? options = null)
     {
         _sessionOptions = options ?? new SessionOptions();
-        _peer = connection ?? throw new ArgumentNullException(nameof(connection));
+        _transport = connection ?? throw new ArgumentNullException(nameof(connection));
+        _keepTransportOpenOnClose = keepTransportOpenOnClose;
         _idGenerator = new StreamIdGenerator(!isClient);
         _channels = new ConcurrentDictionary<uint, SessionChannel>();
         _connects = new ConcurrentDictionary<uint, TaskCompletionSource<IDuplexSessionChannel>>();
@@ -69,8 +78,8 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
         {
             this.Stats = new Statistics(_sessionOptions.StatisticsSampleInterval, _keepAliveToken.Token);
         }
-        _reader = new ConnectionReader(_peer);
-        _writer = new ConnectionWriter(_peer, Stats);
+        _reader = new ConnectionReader(_transport);
+        _writer = new ConnectionWriter(_transport, Stats);
 
         // accept the channel queue
         _acceptQueue = Channel.CreateBounded<SessionChannel>(new BoundedChannelOptions(_sessionOptions.AcceptBacklog)
@@ -100,14 +109,22 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
     /// <returns></returns>
     public ValueTask<IDuplexSessionChannel> OpenChannelAsync(SessionChannelOptions options, bool waitForAcknowledgement = false, CancellationToken? cancel = null)
     {
-        if (IsClosed) 
+        lock (_stateLock)
         {
-            throw new SessionException(SessionErrorCode.SessionShutdown, "Session is closed");
-        }
+            if (IsClosed)
+            {
+                throw new SessionException(SessionErrorCode.SessionShutdown, "Session is closed");
+            }
 
-        if (_remoteGoAway) 
-        {
-            throw new SessionException(SessionErrorCode.SessionShutdown, "Cannot open a new session because Go Away has been received");
+            if (_remoteGoAway)
+            {
+                throw new SessionException(SessionErrorCode.RemoteGoAway, "Cannot open a new channel because Go Away has been received from the remote peer");
+            }
+
+            if (_localGoAway)
+            {
+                throw new SessionException(SessionErrorCode.LocalGoAway, "Cannot open a new channel because Go Away has been sent to the remote peer");
+            }
         }
 
         // create a new channel
@@ -239,7 +256,6 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
     {
         _sessionOptions.DefaultChannelOptions?.Validate();
 
-
         if (IsClosed)
             throw new SessionException(SessionErrorCode.SessionShutdown, "Session has been closed.");
 
@@ -248,16 +264,7 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
 
         _writer.Start();
 
-        ReadFrames().ContinueWith(async t => 
-        {
-            if (t.Exception != null) 
-            {
-                SessionTracer.TraceInformation("[Err]: Session receive loop faulted");
-
-                // fault all the channels
-                await this.CloseAsync((t.Exception.Flatten()?.InnerException as SessionException) ?? new SessionException(SessionErrorCode.StreamError, "Underlying stream encounted an error", t.Exception, SessionTermination.InternalError));
-            }
-        });
+        _readLoop = ReadFrames();
 
         if (_sessionOptions.EnableKeepAlive)
         {
@@ -267,61 +274,136 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
         _started = true;
     }
 
-    public bool IsClosed => _readToken.IsCancellationRequested;
+    public bool IsClosed { get; private set; }
 
+    /// <summary>
+    /// Closes the session.  This does not gracefully close all the open channels.
+    /// Instead it notifies the remote peer session and immediately closes.
+    /// 
+    /// To gracefully shutdown the session and all of its channels, you should use the ShutdownAsync() method
+    /// </summary>
+    /// <returns></returns>
     public Task CloseAsync() => this.CloseAsync(null);
 
-    private async Task CloseAsync(SessionException? err = null)
+    /// <summary>
+    /// Gracefully closes all the open channles, waiting for the remote peer to acknowledge each close
+    /// </summary>
+    /// <param name="timeout">The amount of time to wait for each open channel's close to be acknowledged</param>
+    /// <returns></returns>
+    public async Task<bool> CloseOpenChannelsAsync(TimeSpan timeout) 
     {
-        if (!IsClosed)
-        {
-            try
-            {
-                // send a go away frame to the remote peer, so that they will not create new streams
-                await _writer.WriteAsync(Frame.CreateGoAwayFrame(err?.GoAwayCode ?? SessionTermination.Normal), CancellationToken.None);
-            }
-            catch (Exception ex)
-            {
-                SessionTracer.TraceInformation("[Warn] yamux: Unbable to send GoAway - {0}", ex.Message);
-            }
-           
-            // shutdown keep alive loop
-            if (_keepAlive != null)
-            {
-                _keepAliveToken.Cancel();
-
-                await _keepAlive;
-
-                _keepAliveToken.Dispose();
-            }
-            await CloseInternal(err);
-        }
-    }
-
-    private async ValueTask CloseInternal(SessionException? err = null) 
-    {       
-        _readToken.Cancel(); // shutdown read pump
-        _acceptQueue.Writer.TryComplete(); // signal no more accepted channels
-
-        var inFlightConnects = _connects.Values;
-        foreach (var c in inFlightConnects)
-        {
-            c.TrySetException(new SessionChannelException(ChannelErrorCode.SessionClosed, "The session has been closed"));
-        }
-        _connects.Clear();
-
         var currentChannels = _channels.Values;
-        _channels.Clear();
 
+        ConcurrentBag<Task<bool>> closeTasks = new ConcurrentBag<Task<bool>>();
+
+        // dispose of any open channels
         if (currentChannels.Count > 0)
         {
             foreach (var c in currentChannels)
             {
-                if (!c.IsClosed)
-                {
-                    await c.CloseAsync();
-                }
+                c.Close();
+                closeTasks.Add(c.WhenRemoteCloseAsync(timeout));
             }
+
+            var completed = await Task.WhenAll(closeTasks);
+            return completed.All(c => c);
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Sends a GoAway frame to the remote peer, indicating that no new streams will be created.
+    /// </summary>
+    /// <param name="sessionTermination"></param>
+    /// <param name="cancel"></param>
+    /// <returns></returns>
+    public async Task GoAwayAsync(SessionTermination sessionTermination = SessionTermination.Normal, CancellationToken? cancel = null) 
+    {
+        try
+        {
+            // send a go away frame to the remote peer, so that they will not create new streams
+            await _writer.WriteAsync(Frame.CreateGoAwayFrame(sessionTermination), cancel ?? CancellationToken.None);
+
+            lock (_stateLock)
+            {
+                _localGoAway = true;
+            }
+        }
+        catch (Exception ex)
+        {
+            SessionTracer.TraceInformation("[Warn] yamux: Unbable to send GoAway - {0}", ex.Message);
+        }
+    }
+
+    private async Task CloseAsync(SessionException? err = null)
+    {
+        _closeLock.Wait();
+
+        try
+        {
+            if (!IsClosed)
+            {
+                // shutdown keep alive loop
+                if (_keepAlive != null)
+                {
+                    _keepAliveToken.Cancel();
+
+                    await _keepAlive;
+
+                    _keepAliveToken.Dispose();
+                    _keepAlive = null;
+                }
+
+                await GoAwayAsync(err?.GoAwayCode ?? SessionTermination.Normal);
+
+                var inFlightConnects = _connects.Values;
+                foreach (var c in inFlightConnects)
+                {
+                    c.TrySetException(new SessionChannelException(ChannelErrorCode.SessionClosed, "The session has been closed"));
+                }
+                _connects.Clear();
+
+                var currentChannels = _channels.Values;
+                _channels.Clear();
+
+                // dispose of any open channels
+                if (currentChannels.Count > 0)
+                {
+                    foreach (var c in currentChannels)
+                    {
+                        if (err == null)
+                            c.Dispose();
+                        else
+                            c.Dispose(err);
+                    }
+                }
+                _reader.Stop(); // stop the reader, which should shutdown the read pump 
+
+                if (_readLoop != null)
+                {
+                    if (_readLoop != await Task.WhenAny(_readLoop, Task.Delay(2000)))
+                    {
+                        _readToken.Cancel(); // the read loop should have already exited, but if not single a cancel, which would be a harder shutdown
+                    }
+                }
+
+                if (!_keepTransportOpenOnClose) 
+                {
+                    _transport.Close();
+
+                    if (_transport is IDisposable d)
+                    {
+                        d.Dispose();
+                    }
+                }
+
+                IsClosed = true;
+            }
+        }
+        finally 
+        {
+            _closeLock.Release();
         }
     }
 
@@ -340,47 +422,53 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
 
     private async Task ReadFrames() 
     {
-        await foreach(var frameHeader in _reader.ReadFramesAsync(_readToken.Token))
+        try
         {
-            switch (frameHeader.FrameType)
+            await foreach (var frameHeader in _reader.ReadFramesAsync(_readToken.Token))
             {
-                case FrameType.Data:
-                    await HandleDataFrame(frameHeader, _readToken.Token);
-                    break;
-                case FrameType.WindowUpdate:
-                    await HandleWindowUpdateFrame(frameHeader, _readToken.Token);
-                    break;
-                case FrameType.Ping:
-                    HandlePingFrame(frameHeader, _readToken.Token);
-                    break;
-                case FrameType.GoAway:
-                    await HandleGoAway(frameHeader, _readToken.Token);
-                    break;
-                default:
-                    throw new NotImplementedException();
+                switch (frameHeader.FrameType)
+                {
+                    case FrameType.Data:
+                        await HandleDataFrame(frameHeader, _readToken.Token);
+                        break;
+                    case FrameType.WindowUpdate:
+                        await HandleWindowUpdateFrame(frameHeader, _readToken.Token);
+                        break;
+                    case FrameType.Ping:
+                        HandlePingFrame(frameHeader, _readToken.Token);
+                        break;
+                    case FrameType.GoAway:
+                        HandleGoAway(frameHeader, _readToken.Token);
+                        break;
+                    default:
+                        throw new NotImplementedException();
+                }
             }
+        }
+        catch (Exception ex) 
+        {
+            SessionTracer.TraceInformation("[Err]: Session receive loop faulted");
+
+            // fault all the channels
+            await this.CloseAsync((ex as SessionException) ?? new SessionException(SessionErrorCode.StreamError, "Underlying stream encounted an error", ex, SessionTermination.InternalError));
         }
     }
 
-    private async ValueTask HandleGoAway(FrameHeader frameHeader, CancellationToken token)
+    private void HandleGoAway(FrameHeader frameHeader, CancellationToken token)
     {
-        // how to handle go away
-        switch (frameHeader.Length)
+        lock (_stateLock)
         {
-            case (uint)SessionTermination.Normal:
-                _remoteGoAway = true;
-                await this.CloseAsync();
-                break;
-            case (uint)SessionTermination.ProtocolError:
-                SessionTracer.TraceInformation("[Err] yamux: received protocol error go away");
-                throw new SessionException(SessionErrorCode.SessionShutdown, SessionTermination.ProtocolError);
-            case (uint)SessionTermination.InternalError:
-                SessionTracer.TraceInformation("[Err] yamux: received internal error go away");
-                throw new SessionException(SessionErrorCode.SessionShutdown, SessionTermination.InternalError);
-            default:
-                SessionTracer.TraceInformation("[Err] yamux: received unexpected go away");
-                throw new SessionException(SessionErrorCode.SessionShutdown, SessionTermination.InternalError);
+            _remoteGoAway = true;
+            _goAwayError = (SessionTermination)frameHeader.Length;
         }
+
+        // no more accepts, we can complete the channel
+        _acceptQueue.Writer.TryComplete(); // signal no more accepted channels
+
+        // we also won't accept any frames
+
+        if (SessionTracer.Switch.ShouldTrace(TraceEventType.Information))
+            SessionTracer.TraceInformation($"[Err] yamux: received go away ({_goAwayError})");
     }
 
     private async Task HandleWindowUpdateFrame(FrameHeader frameHeader, CancellationToken token)
@@ -487,6 +575,22 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
 
         if (flags.HasFlag(Flags.SYN))
         {
+            bool reject = false;
+            // reject the channel if we have already sent a go awy
+            lock (_stateLock)
+            {
+                if (_localGoAway)
+                {
+                    reject = true;
+                }
+            }
+
+            if (reject)
+            {
+                await this._writer.WriteAsync(Frame.CreateWindowUpdateFrame(id, Flags.RST, 0), cancel);
+                return null;
+            }
+
             // create a new channel
             SessionChannel newChannel = new(this, id, this._sessionOptions.DefaultChannelOptions);
             _channels.TryAdd(id, newChannel);

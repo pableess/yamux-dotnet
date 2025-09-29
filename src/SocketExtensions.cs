@@ -15,6 +15,6 @@ namespace Yamux
         /// <param name="stream"></param>
         /// <returns></returns>
         public static Session AsYamuxSession(this Socket socket, bool isClient, bool keepOpen = false, SessionOptions? options = null)
-            => new Session(new SocketPeer(socket), isClient, options);
+            => new Session(new SocketPeer(socket), isClient, keepOpen, options);
     }
 }

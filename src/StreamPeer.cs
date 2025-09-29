@@ -33,5 +33,10 @@ namespace Yamux
         {
             _stream.Close();
         }
+
+        public void Dispose()
+        {
+            _stream.Dispose();
+        }
     }
 }

@@ -22,6 +22,11 @@ namespace Yamux
             _socket.Close();
         }
 
+        public void Dispose()
+        {
+            _socket.Dispose();
+        }
+
         public async ValueTask<int> ReadAsync(Memory<byte> data, CancellationToken cancel)
         {
             var read = await _socket.ReceiveAsync(data, System.Net.Sockets.SocketFlags.None, cancel);
