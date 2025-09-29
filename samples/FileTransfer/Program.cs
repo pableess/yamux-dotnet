@@ -266,7 +266,9 @@ namespace FileTransfer
                         await stream.WriteAsync(buffer, 0, read, stoppingToken);
                         info.BytesTransferred += read;
                     }
-                    await channel.CloseAsync();
+                    channel.Close();
+                    await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(2));
+                    channel.Dispose();
                 }
                 catch (Exception) { }
                 finally

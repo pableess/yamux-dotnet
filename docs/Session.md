@@ -27,8 +27,12 @@ The `Session` class represents a Yamux session, allowing multiple logical stream
   - Sends a ping and returns the round-trip time.
 - `void Start()`
   - Starts the session. Throws `SessionException` if already closed.
-- `Task CloseAsync()`
+- `Task Close()`
   - Closes the session.
+- `Task GoAwayAsync()`
+  - Sends a GoAway frame to the remote peer indication no new channels.`
+- `Task CloseOpenChannelsAsync`
+  - Tries to gracefully close all open channels on the session.
 - `void Dispose()` / `ValueTask DisposeAsync()`
   - Disposes the session and resources.
 
