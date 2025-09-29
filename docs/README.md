@@ -57,6 +57,9 @@ await foreach (var incomingChannel in yamuxSession.AcceptChannelsAsync())
 
 #### Reading from a Channel
 
+You can read data from the channel using its `Input` pipe:
+(or use `AsStream()` to get a Stream interface))
+
 ```csharp
 async Task HandleChannelAsync(ISessionChannel channel)
 {
@@ -96,16 +99,7 @@ async Task HandleChannelAsync(ISessionChannel channel)
 
 #### Writing to a Channel
 
-You can write to a channel using its `Output` pipe:
-
-```csharp
-async Task WriteToChannelAsync(ISessionChannel channel, byte[] data)
-{
-    var writer = channel.Output;
-    await writer.WriteAsync(data);
-    await writer.FlushAsync();
-}
-```
+You can write to a channel WriteAsync method:
 
 #### Converting a Channel to a Stream
 
@@ -128,13 +122,17 @@ It is important to properly close and dispose of channels when you are done with
 
 ```csharp
 // Gracefully close the channel
-await channel.CloseAsync();
+channel.Close();
+
+// either continue reading data from the input pipe until it is completed
+// or you can separately wait for the remote peer to acknowledge the close
+channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(5));
 
 // Dispose the channel to release resources
 channel.Dispose();
 ```
 
-You can also use a `using` statement for automatic disposal:
+You can also use a `using` statement for automatic disposal, although if the channel is not closed before a dispose it is a forced close operation:
 
 ```csharp
 using (var channel = await yamuxSession.OpenChannelAsync())
