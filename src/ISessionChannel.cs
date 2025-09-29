@@ -20,13 +20,32 @@ public interface ISessionChannel : IDisposable
     public bool IsClosed { get; }
 
     /// <summary>
-    /// Fully closes the channel, waiting for the remote party to acknowledge the close if necessary
+    /// Aborts the channel immediately, sending a RST to the remote peer if the channel is not already closed
+    /// </summary>
+    public void Abort();
+
+    /// <summary>
+    /// Closes the channel.  This closes the channel for writing, but more data could still be read from the channel until the 
+    /// remote peer acknowledges the close.  If you would like to wait until the remote peer has acknowledged the close, you can either continue reading
+    /// until the pipe is completed, or call WaitForRemoteClose() or WhenRemoteCloseAsync()
+    /// 
+    /// </summary>
+    public void Close();
+
+    /// <summary>
+    /// Waits until the remote peer has closed the channel
+    /// </summary>
+    /// <param name="timeout">A maximum amount of time to wait</param>
+    /// <returns>true if the remote peer has closed, false if the operation has timed out</returns>
+    public bool WaitForRemoteClose(TimeSpan timeout);
+
+    /// <summary>
+    /// Returns a task that completes when the remote peer has closed the channel.
+    /// Use with caution as remote peer may fail to send proper close acknowledgement
     /// </summary>
     /// <param name="timeout"></param>
-    /// <param name="cancel"></param>
-    /// <returns>A task that completes when the remote party has acknowledged the close</returns>
-    /// <exception cref="InvalidOperationException"></exception>
-    public ValueTask CloseAsync(TimeSpan? timeout = null, CancellationToken? cancel = null);
+    /// <returns>True if the remote peer was closed, false if the timeout was reached</returns>
+    public Task<bool> WhenRemoteCloseAsync(TimeSpan timeout);
 
     /// <summary>
     /// Ensures that all written data is flushed in the underlying session connection

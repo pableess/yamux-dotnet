@@ -61,7 +61,8 @@ namespace Yamux.Tests
 
                 } while (!res.IsCanceled && !res.IsCompleted);
 
-                await channel.CloseAsync();
+                channel.Close();
+                await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
 
                 channel.Dispose();
             });
@@ -89,8 +90,8 @@ namespace Yamux.Tests
                     current += chunkSize;
                 }
 
-
-                await channel.CloseAsync();
+                channel.Close();
+                await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
             });
 
             await Task.WhenAll(serverTask, clientTask);
@@ -143,6 +144,8 @@ namespace Yamux.Tests
 
                     } while (!res.IsCanceled && !res.IsCompleted);
 
+                    channel.Close();
+                    await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
                     channel.Dispose();
                 }
 
@@ -178,7 +181,8 @@ namespace Yamux.Tests
                         current += chunkSize;
                     }
 
-                    await channel.CloseAsync();
+                    channel.Close();
+                    await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
                 }
 
                 var taskA = SendOnChannelAsync(buffer1);
@@ -203,26 +207,28 @@ namespace Yamux.Tests
             (var client, var server) = FullDuplexStream.CreatePair();
 
             // try to open a stream from the client side and 
-
             var serverTask = Task.Run(async () =>
             {
                 await using var serverSession = new Session(new StreamPeer(server), false);
                 serverSession.Start();
                 using var channel = await serverSession.AcceptAsync();
 
-                ReadResult res;
-
-                do
+                Func<Task> read = async () =>
                 {
-                    res = await channel.Input.ReadAsync();
-
-                    if (res.Buffer.Length > 0)
+                    ReadResult res;
+                    do
                     {
-                        channel.Input.AdvanceTo(res.Buffer.End, res.Buffer.End);
-                    }
+                        res = await channel.Input.ReadAsync();
+                        if (res.Buffer.Length > 0)
+                        {
+                            channel.Input.AdvanceTo(res.Buffer.End, res.Buffer.End);
+                        }
+                    } while (!res.IsCanceled && !res.IsCompleted);
 
-                } while (!res.IsCanceled && !res.IsCompleted);
+                    // done
+                };
 
+                await Assert.ThrowsAsync<SessionException>(read);
             });
 
             var clientTask = Task.Run(async () =>
@@ -241,6 +247,7 @@ namespace Yamux.Tests
                 await channel.WriteAsync(buffer, CancellationToken.None);
                 await channel.WriteAsync(buffer, CancellationToken.None);
 
+                // kill the session without closing all the channels will cause the channels to fault
                 await clientSession.DisposeAsync();
             });
 
@@ -272,8 +279,9 @@ namespace Yamux.Tests
 
                 using MemoryStream ms = new MemoryStream(buffer);
                 await ms.CopyToAsync(stream);
-
-                await channel.CloseAsync();
+                
+                channel.Close();
+                await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
 
                 channel.Dispose();
             });
@@ -325,7 +333,6 @@ namespace Yamux.Tests
                         channel.Input.AdvanceTo(res.Buffer.End, res.Buffer.End);
 
                     } while (!res.IsCanceled && !res.IsCompleted);
-
                 };
 
                 // assert that we get a session protocol exception
@@ -336,21 +343,33 @@ namespace Yamux.Tests
 
             var clientTask = Task.Run(async () =>
             {
-                await using var clientSession = new Session(new StreamPeer(client), true);
-                clientSession.Start();
+                try
+                {
+                    await using var clientSession = new Session(new StreamPeer(client), true);
+                    clientSession.Start();
 
-                using var channel = await clientSession.OpenChannelAsync();
-                
-                var faker = new Faker();
-                var data = faker.Random.Chars(count: 1024 * 312); // 312 KB random string
-                var buffer = Encoding.UTF8.GetBytes(data).AsMemory();
-                await channel.WriteAsync(buffer, default);
+                    using var channel = await clientSession.OpenChannelAsync();
 
-                // send header with invalid version on the original stream
-                await client.WriteAsync(new byte[] { 0x01, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20 }.AsMemory(), default);
+                    var faker = new Faker();
+                    var data = faker.Random.Chars(count: 1024 * 312); // 312 KB random string
+                    var buffer = Encoding.UTF8.GetBytes(data).AsMemory();
+                    await channel.WriteAsync(buffer, default);
 
-                await Task.Delay(10);
-                await clientSession.DisposeAsync();
+                    // send header with invalid version on the original stream
+                    // do this by directly writing to the underlying stream, bypassing the yamux session
+                    await client.WriteAsync(new byte[] { 0x01, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20 }.AsMemory(), default);
+                    await client.FlushAsync(); // flush to make sure it is available to be read by the other side
+
+                    // try to write more data, which may fail if the other side has already closed the session
+                    await channel.WriteAsync(buffer.Slice(0, 64), default);
+
+                    await Task.Delay(200);
+                    
+                }
+                catch (YamuxException)
+                {
+                    // swallow the exception because the client will have closed when we sent it invalid data
+                }
             });
 
             await Task.WhenAll(serverTask, clientTask);
@@ -385,7 +404,8 @@ namespace Yamux.Tests
                     await channel.WriteAsync(_buffer);
                 }
 
-                await channel.CloseAsync();
+                channel.Close();
+                await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
                 await session.CloseAsync();
             });
 
@@ -406,7 +426,8 @@ namespace Yamux.Tests
                     channel.Input.AdvanceTo(res.Buffer.End, res.Buffer.End);
                 } while (!res.IsCompleted);
 
-                await channel.CloseAsync();
+                channel.Close();
+                await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
                 await session.CloseAsync();
             });
 

@@ -30,7 +30,7 @@ jobs:
       - name: Test
         run: dotnet test --no-build --configuration Release --verbosity normal
       - name: Pack
-        run: dotnet pack src/Yamux/Yamux.csproj --no-build --configuration Release --output ./nupkg
+        run: dotnet pack src/Yamux.csproj --no-build --configuration Release --output ./nupkg
       - name: Set Version Variable
         run: |
           VERSION=$(grep '<VersionPrefix>' Directory.Build.props | sed -E 's/.*>(.*)<.*/\1/')-$(grep '<VersionSuffix>' Directory.Build.props | sed -E 's/.*>(.*)<.*/\1/')

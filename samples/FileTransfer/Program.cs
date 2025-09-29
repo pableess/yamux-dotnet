@@ -11,6 +11,7 @@ using System.Threading.Channels;
 using Yamux;
 using System.Text.Json;
 using System.Security.Cryptography;
+using System.Diagnostics;
 
 namespace FileTransfer
 {
@@ -72,13 +73,19 @@ namespace FileTransfer
         }
     }
 
+    internal record FileMetadata(string Name, long Length);
+
+    internal record FileTransferInfo(string SessionId, uint ChannelId, string FileName, long FileSize) 
+    {
+        public long BytesTransferred { get; set; }
+    }
+
     public class ServerService : BackgroundService
     {
         private readonly DirectoryInfo _directory;
         private readonly object _lock = new();
         private readonly ConcurrentDictionary<uint, FileTransferInfo> _activeTransfers = new();
         private readonly ConcurrentDictionary<int, string> _sessionIds = new();
-        private int _nextSessionId = 1;
 
         public ServerService(DirectoryInfo directory)
         {
@@ -120,13 +127,16 @@ namespace FileTransfer
                     _ = Task.Run(async () => await ReadFileAsync(channel, sessionId, channel.Id, stoppingToken));
                 }
                 catch (OperationCanceledException) { }
-                catch (SessionException ex) { }
+                catch (SessionException) 
+                {
+                    // expected when the session is closed
+                }
             }
         }
 
         private async Task ReadFileAsync(IReadOnlySessionChannel channel, string sessionId, uint channelId, CancellationToken stoppingToken)
         {
-            FileTransferInfo info = null;
+            FileTransferInfo? info = null;
             try
             {
                 // Read metadata
@@ -134,15 +144,9 @@ namespace FileTransfer
                 var bytesRead = await channel.Input.AsStream().ReadAsync(metadataBuffer, stoppingToken);
                 var metadataJson = System.Text.Encoding.UTF8.GetString(metadataBuffer, 0, bytesRead);
                 var metadata = JsonSerializer.Deserialize<FileMetadata>(metadataJson);
-                var filePath = Path.Combine(_directory.FullName, metadata.Name);
-                info = new FileTransferInfo
-                {
-                    SessionId = sessionId,
-                    ChannelId = channelId,
-                    FileName = metadata.Name,
-                    FileSize = metadata.Length,
-                    BytesReceived = 0
-                };
+                var filePath = Path.Combine(_directory.FullName, metadata!.Name);
+                info = new FileTransferInfo(sessionId, channelId, metadata.Name, metadata.Length);
+
                 _activeTransfers[channelId] = info;
                 using var fs = File.Create(filePath);
                 var buffer = new byte[81920];
@@ -151,7 +155,7 @@ namespace FileTransfer
                 while ((read = await stream.ReadAsync(buffer, 0, buffer.Length, stoppingToken)) > 0)
                 {
                     await fs.WriteAsync(buffer, 0, read, stoppingToken);
-                    info.BytesReceived += read;
+                    info.BytesTransferred += read;
                 }
             }
             catch (OperationCanceledException) { }
@@ -181,12 +185,12 @@ namespace FileTransfer
                         table.Rows.Clear();
                         foreach (var kv in _activeTransfers.Values)
                         {
-                            var percent = kv.FileSize > 0 ? (double)kv.BytesReceived / kv.FileSize * 100 : 0;
+                            var percent = kv.FileSize > 0 ? (double)kv.BytesTransferred / kv.FileSize * 100 : 0;
                             table.AddRow(
                                 kv.SessionId,
                                 kv.ChannelId.ToString(),
                                 kv.FileName,
-                                $"{kv.BytesReceived}/{kv.FileSize} ({percent:F1}%)"
+                                $"{kv.BytesTransferred}/{kv.FileSize} ({percent:F1}%)"
                             );
                         }
                         ctx.Refresh();
@@ -200,21 +204,6 @@ namespace FileTransfer
             // 8-char random hex
             var bytes = RandomNumberGenerator.GetBytes(4);
             return BitConverter.ToString(bytes).Replace("-", "");
-        }
-
-        private class FileMetadata
-        {
-            public string Name { get; set; }
-            public long Length { get; set; }
-        }
-
-        private class FileTransferInfo
-        {
-            public string SessionId { get; set; }
-            public uint ChannelId { get; set; }
-            public string FileName { get; set; }
-            public long FileSize { get; set; }
-            public long BytesReceived { get; set; }
         }
     }
 
@@ -252,20 +241,13 @@ namespace FileTransfer
 
             var tasks = files.Select(file => Task.Run(async () =>
             {
-                FileTransferInfo info = null;
+                FileTransferInfo? info = null;
                 uint channelId = 0;
                 try
                 {
                     var channel = await session.OpenChannelAsync();
                     channelId = channel.Id;
-                    info = new FileTransferInfo
-                    {
-                        SessionId = _sessionId,
-                        ChannelId = channelId,
-                        FileName = file.Name,
-                        FileSize = file.Length,
-                        BytesSent = 0
-                    };
+                    info = new FileTransferInfo(_sessionId, channelId, file.Name, file.Length);
                     _activeTransfers[channelId] = info;
 
                     // Send metadata
@@ -282,9 +264,11 @@ namespace FileTransfer
                     while ((read = await fs.ReadAsync(buffer, 0, buffer.Length, stoppingToken)) > 0)
                     {
                         await stream.WriteAsync(buffer, 0, read, stoppingToken);
-                        info.BytesSent += read;
+                        info.BytesTransferred += read;
                     }
-                    await channel.CloseAsync();
+                    channel.Close();
+                    await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(2));
+                    channel.Dispose();
                 }
                 catch (Exception) { }
                 finally
@@ -315,12 +299,12 @@ namespace FileTransfer
                         table.Rows.Clear();
                         foreach (var kv in _activeTransfers.Values)
                         {
-                            var percent = kv.FileSize > 0 ? (double)kv.BytesSent / kv.FileSize * 100 : 0;
+                            var percent = kv.FileSize > 0 ? (double)kv.BytesTransferred / kv.FileSize * 100 : 0;
                             table.AddRow(
                                 kv.SessionId,
                                 kv.ChannelId.ToString(),
                                 kv.FileName,
-                                $"{kv.BytesSent}/{kv.FileSize} ({percent:F1}%)"
+                                $"{kv.BytesTransferred}/{kv.FileSize} ({percent:F1}%)"
                             );
                         }
                         ctx.Refresh();
@@ -335,13 +319,6 @@ namespace FileTransfer
             return BitConverter.ToString(bytes).Replace("-", "");
         }
 
-        private class FileTransferInfo
-        {
-            public required string SessionId { get; set; }
-            public required uint ChannelId { get; set; }
-            public required string FileName { get; set; }
-            public required long FileSize { get; set; }
-            public required long BytesSent { get; set; }
-        }
+      
     }
 }

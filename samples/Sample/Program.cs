@@ -170,8 +170,7 @@ namespace Sample
             using Socket socket = new Socket(SocketType.Stream, ProtocolType.Tcp);
             await socket.ConnectAsync(new IPEndPoint(IPAddress.Loopback, 5000));
 
-            using var link = new NetworkStream(socket);
-            await using var session = link.AsYamuxSession(true, options: new SessionOptions
+            await using var session = socket.AsYamuxSession(true, options: new SessionOptions
             {
                 EnableStatistics = true,
                 StatisticsSampleInterval = 1000,
@@ -237,8 +236,7 @@ namespace Sample
             socket.Listen();
 
             using var clientSocket = await socket.AcceptAsync(stoppingToken);
-            using var link = new NetworkStream(clientSocket);
-            await using var session = link.AsYamuxSession(false, options: new SessionOptions
+            await using var session = clientSocket.AsYamuxSession(false, options: new SessionOptions
             {
                 EnableStatistics = true,
                 StatisticsSampleInterval = 1000,
