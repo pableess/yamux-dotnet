@@ -48,6 +48,12 @@ internal class ChannelManager
     {
         if (_channels.TryGetValue(id, out var channel))
         {
+            if (flags.HasFlag(Flags.SYN))
+            {
+                Session.SessionTracer.TraceEvent(TraceEventType.Error, 0, $"[Err] yamux: duplicate stream declared: {id}");
+                await writer.WriteAsync(Frame.CreateWindowUpdateFrame(id, Flags.RST, 0), cancel);
+                return null;
+            }
             return channel;
         }
 

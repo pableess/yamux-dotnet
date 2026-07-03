@@ -52,7 +52,8 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
             _writer,
             Stats,
             null,
-            ex => CloseAsync((ex as SessionException) ?? new SessionException(SessionErrorCode.StreamError, "Underlying stream encountered an error", ex, SessionTermination.InternalError)));
+            ex => CloseAsync((ex as SessionException) ?? new SessionException(SessionErrorCode.StreamError, "Underlying stream encountered an error", ex, SessionTermination.InternalError)),
+            _sessionOptions);
 
         if (_sessionOptions.EnableMetrics)
         {
@@ -190,7 +191,7 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
         }
         catch (Exception ex)
         {
-            SessionTracer.TraceInformation("[Warn] yamux: Unbable to send GoAway - {0}", ex.Message);
+            SessionTracer.TraceInformation("[Warn] yamux: Unable to send GoAway - {0}", ex.Message);
         }
     }
 
@@ -285,7 +286,16 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
         return _writer.WriteAsync(frame, cancel);
     }
 
+    void IChannelSessionAdapter.EnqueueFrame(Frame frame)
+    {
+        _writer.EnqueueFrame(frame);
+    }
+
     Task IChannelSessionAdapter.SessionFault => _sessionFault.Task;
+
+    TimeSpan IChannelSessionAdapter.StreamSendTimeout => _sessionOptions.StreamSendTimeout;
+
+    TimeSpan IChannelSessionAdapter.StreamCloseTimeout => _sessionOptions.StreamCloseTimeout;
 
     void IChannelSessionAdapter.ChannelDisconnect(SessionChannel channel)
     {

@@ -44,6 +44,7 @@ internal class SessionChannel : IDuplexSessionChannel
     private TaskCompletionSource _remoteCloseTask;
     private ManualResetEventSlim _remoteAckEvent;
     private TaskCompletionSource _remoteAckTask;
+    private Timer? _closeTimer;
     private uint _receiveWindowMax;
 
     private volatile bool _disposed;
@@ -52,7 +53,7 @@ internal class SessionChannel : IDuplexSessionChannel
     private ChannelLocalPhase _localPhase;
     private ChannelRemoteState _remoteState;
 
-    private long _timeSinceLastUpdate;
+    private long _timeSinceLastUpdate = Stopwatch.GetTimestamp();
 
     public bool IsClosed
     {
@@ -99,6 +100,7 @@ internal class SessionChannel : IDuplexSessionChannel
         _session = session;
         _channelOptions = defaultOptions;
         _remoteState = initialRemoteState;
+        _writeTimeout = session.StreamSendTimeout;
 
         _inputBuffer = new Pipe(new PipeOptions(pauseWriterThreshold: _channelOptions.ReceiveWindowUpperBound + 1));
 
@@ -130,6 +132,8 @@ internal class SessionChannel : IDuplexSessionChannel
 
     public uint Id { get; }
 
+    internal uint ReceiveWindowUpperBound => _channelOptions.ReceiveWindowUpperBound;
+
     private CountingPipeReader _input;
     public PipeReader Input => _input;
 
@@ -153,12 +157,13 @@ internal class SessionChannel : IDuplexSessionChannel
     public async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken? cancel = null)
     {
         cancel?.ThrowIfCancellationRequested();
-        this.ValidateStateForWrite();
 
         var writeClosedToken = _writeClosedCancellation.Token;
 
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancel ?? CancellationToken.None, writeClosedToken);
         var linkedToken = linkedCts.Token;
+
+        this.ValidateStateForWrite();
 
         try
         {
@@ -280,6 +285,9 @@ internal class SessionChannel : IDuplexSessionChannel
 
                 _writeClosedCancellation.Cancel();
 
+                _closeTimer?.Dispose();
+                _closeTimer = null;
+
                 if (_remoteState < ChannelRemoteState.ReadClosed)
                 {
                     _remoteState = ChannelRemoteState.Reset;
@@ -336,7 +344,7 @@ internal class SessionChannel : IDuplexSessionChannel
 
         if (options.ReceiveWindowSize < _channelOptions.ReceiveWindowSize)
         {
-            throw new ValidationException("RecevieWindowSize can not be specified as a smaller value than what is specified as the Default channel options on the session");
+            throw new ValidationException("ReceiveWindowSize can not be specified as a smaller value than what is specified as the Default channel options on the session");
         }
 
         _channelOptions = options;
@@ -373,6 +381,41 @@ internal class SessionChannel : IDuplexSessionChannel
             _localPhase = ChannelLocalPhase.WriteClosed;
             this.SendWindowUpdate(0);
         }
+
+        var closeTimeout = _session.StreamCloseTimeout;
+        if (closeTimeout > TimeSpan.Zero)
+        {
+            lock (_stateLock)
+            {
+                if (_remoteState < ChannelRemoteState.ReadClosed)
+                {
+                    _closeTimer = new Timer(_ =>
+                    {
+                        ForceCloseTimeout();
+                    }, null, closeTimeout, Timeout.InfiniteTimeSpan);
+                }
+            }
+        }
+    }
+
+    private void ForceCloseTimeout()
+    {
+        lock (_stateLock)
+        {
+            if (_remoteState >= ChannelRemoteState.ReadClosed)
+                return;
+
+            _localPhase = ChannelLocalPhase.WriteClosed;
+            _remoteState = ChannelRemoteState.Reset;
+
+            _writeClosedCancellation.Cancel();
+            _inputBuffer.Writer.Complete(_fault ?? new SessionChannelException(ChannelErrorCode.ChannelClosed, "Stream close timeout exceeded"));
+            _remoteCloseEvent.Set();
+            _remoteCloseTask.TrySetResult();
+        }
+
+        this.SendWindowUpdate(0, (Flags)Flags.RST);
+        _session.ChannelDisconnect(this);
     }
 
     internal void UpdateRemoteWindow(uint length, Flags flags)
@@ -453,6 +496,8 @@ internal class SessionChannel : IDuplexSessionChannel
             {
                 if (_remoteState < ChannelRemoteState.ReadClosed)
                 {
+                    _closeTimer?.Dispose();
+                    _closeTimer = null;
                     _remoteState = ChannelRemoteState.ReadClosed;
                     _inputBuffer.Writer.Complete(_fault);
                     _remoteCloseEvent.Set();
@@ -462,6 +507,8 @@ internal class SessionChannel : IDuplexSessionChannel
 
             if (flags.HasFlag((Flags)Flags.RST))
             {
+                _closeTimer?.Dispose();
+                _closeTimer = null;
                 _fault = new SessionChannelException(ChannelErrorCode.ChannelRejected, "Channel was rejected or forcibly closed by the remote peer");
                 _remoteState = ChannelRemoteState.Reset;
                 _localPhase = ChannelLocalPhase.WriteClosed;
@@ -481,6 +528,8 @@ internal class SessionChannel : IDuplexSessionChannel
         {
             if (_remoteState < ChannelRemoteState.ReadClosed)
             {
+                _closeTimer?.Dispose();
+                _closeTimer = null;
                 _remoteState = ChannelRemoteState.ReadClosed;
                 _inputBuffer.Writer.Complete(fault);
                 _remoteCloseEvent.Set();
@@ -533,13 +582,7 @@ internal class SessionChannel : IDuplexSessionChannel
         if (Session.SessionTracer.Switch.ShouldTrace(TraceEventType.Verbose))
             Session.SessionTracer.TraceEvent(TraceEventType.Verbose, 0, $"[Dbg] yamux: Channel {Id} sending window update (increment: {incrementWindow})");
         var update = Frame.CreateWindowUpdateFrame(this.Id, flags ?? GetSendFlags(), incrementWindow);
-        _session.SendFrameAsync(update, CancellationToken.None).AsTask().ContinueWith(t =>
-        {
-            if (t.IsFaulted)
-            {
-                Session.SessionTracer.TraceEvent(TraceEventType.Warning, 0, $"[Warn] yamux: Channel {Id} window update failed: {t.Exception?.InnerException?.Message}");
-            }
-        }, TaskContinuationOptions.OnlyOnFaulted);
+        _session.EnqueueFrame(update);
     }
 
     private void ValidateStateForWrite()

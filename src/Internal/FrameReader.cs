@@ -14,6 +14,7 @@ internal class FrameReader
     private YamuxMetrics? _metrics;
     private readonly Func<Exception, Task> _onFault;
     private readonly CancellationTokenSource _readToken = new();
+    private readonly SessionOptions _sessionOptions;
 
     private Task? _readLoop;
 
@@ -24,7 +25,8 @@ internal class FrameReader
         ConnectionWriter writer,
         Statistics? stats,
         YamuxMetrics? metrics,
-        Func<Exception, Task> onFault)
+        Func<Exception, Task> onFault,
+        SessionOptions sessionOptions)
     {
         _reader = reader;
         _channelManager = channelManager;
@@ -33,6 +35,7 @@ internal class FrameReader
         _stats = stats;
         _metrics = metrics;
         _onFault = onFault;
+        _sessionOptions = sessionOptions;
     }
 
     internal void SetMetrics(YamuxMetrics? metrics) => _metrics = metrics;
@@ -114,6 +117,18 @@ internal class FrameReader
     {
         var channel = await _channelManager.GetOrCreateAsync(frameHeader.StreamId, frameHeader.Flags, _writer, token);
 
+        if (channel != null && frameHeader.Length > channel.ReceiveWindowUpperBound)
+        {
+            Session.SessionTracer.TraceEvent(TraceEventType.Error, 0, $"[Err] yamux: receive window exceeded (stream: {channel.Id}, length: {frameHeader.Length}, max: {channel.ReceiveWindowUpperBound})");
+
+            _ = _writer.WriteAsync(
+                Frame.CreateGoAwayFrame(SessionTermination.ProtocolError),
+                CancellationToken.None);
+            throw new SessionException(SessionErrorCode.RecvWindowExceeded,
+                $"receive window exceeded (stream: {channel.Id})",
+                SessionTermination.ProtocolError);
+        }
+
         await ReadPayloadData(frameHeader.Length, channel, token);
     }
 
@@ -122,6 +137,8 @@ internal class FrameReader
         int bytesToRead = (int)payloadLength;
 
         bool pipeOpen = channel != null && !channel.IsClosed;
+        using var discardBuffer = MemoryPool<byte>.Shared.Rent(4096);
+
         do
         {
             if (pipeOpen && channel != null)
@@ -170,9 +187,7 @@ internal class FrameReader
             {
                 Session.SessionTracer.TraceInformation("[WARN] yamux: channel is closed, discarding data for stream {0}", channel?.Id ?? 0);
 
-                using var buffer = MemoryPool<byte>.Shared.Rent(4096);
-
-                var read = await _reader.ReadFramePayloadAsync(buffer.Memory, cancellationToken);
+                var read = await _reader.ReadFramePayloadAsync(discardBuffer.Memory, cancellationToken);
                 if (read == 0)
                 {
                     throw new SessionException(SessionErrorCode.StreamClosed, "Remote connection closed mid-frame");

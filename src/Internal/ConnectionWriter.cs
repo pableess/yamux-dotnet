@@ -94,25 +94,39 @@ internal class ConnectionWriter
             if (Session.SessionTracer.Switch.ShouldTrace(TraceEventType.Verbose))
                 Session.SessionTracer.TraceEvent(TraceEventType.Verbose, 0, "[Dbg] yamux: Enqueuing frame for write - {0}, payload size = {1}", frame.Header.FrameType, frame.Header.Length);
 
-            while (await _writeQueue.Writer.WaitToWriteAsync(cancel))
-            {
-                if (_writeQueue.Writer.TryWrite((frame, tcs)))
-                {
-                    if (Session.SessionTracer.Switch.ShouldTrace(TraceEventType.Verbose))
-                        Session.SessionTracer.TraceEvent(TraceEventType.Verbose, 0, "[Dbg] yamux: Frame enqueued for write - {0}, payload size = {1}", frame.Header.FrameType, frame.Header.Length);
-                    break;
-                }
-                else
-                {
-                    if (Session.SessionTracer.Switch.ShouldTrace(TraceEventType.Warning))
-                        Session.SessionTracer.TraceEvent(TraceEventType.Warning, 0, "[Dbg] yamux: Write queue full, waiting to enqueue frame - {0}", frame.Header.FrameType);
-                }
-            }
+            await _writeQueue.Writer.WriteAsync((frame, tcs), cancel);
+
+            if (Session.SessionTracer.Switch.ShouldTrace(TraceEventType.Verbose))
+                Session.SessionTracer.TraceEvent(TraceEventType.Verbose, 0, "[Dbg] yamux: Frame enqueued for write - {0}, payload size = {1}", frame.Header.FrameType, frame.Header.Length);
 
             // wait for the write to complete
             await tcs.Task;
             if (Session.SessionTracer.Switch.ShouldTrace(TraceEventType.Verbose))
                 Session.SessionTracer.TraceEvent(TraceEventType.Verbose, 0, "[Dbg] yamux: Write completed for frame - {0}, payload size = {1}", frame.Header.FrameType, frame.Header.Length);
+        }
+
+        public void EnqueueFrame(Frame frame)
+        {
+            var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            if (_writeQueue.Writer.TryWrite((frame, tcs)))
+            {
+                return;
+            }
+
+            // Channel is full - fire-and-forget the write asynchronously
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await _writeQueue.Writer.WriteAsync((frame, tcs), CancellationToken.None);
+                }
+                catch (Exception ex)
+                {
+                    if (Session.SessionTracer.Switch.ShouldTrace(TraceEventType.Warning))
+                        Session.SessionTracer.TraceEvent(TraceEventType.Warning, 0, "[Warn] yamux: EnqueueFrame write failed: {0}", ex.Message);
+                }
+            });
         }
 
         public async Task StopAsync()
