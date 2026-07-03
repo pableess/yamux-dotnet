@@ -5,12 +5,12 @@ The `Session` class represents a Yamux session, allowing multiple logical stream
 ## Public API
 
 ### Constructors
-- `internal Session(FrameFormatterBase frameFormatter, bool isClient, SessionOptions? options = null)`
+- `internal Session(ITransport connection, bool isClient, bool keepTransportOpenOnClose = false, SessionOptions? options = null)`
 
 ### Properties
-- `TimeSpan? RTT` — Most recent round-trip time measurement.
-- `Statistics? Stats` — Bandwidth and byte statistics.
-- `bool IsClosed` — Indicates if the session is closed.
+- `TimeSpan? RTT`  Most recent round-trip time measurement.
+- `Statistics? Stats`  Bandwidth and byte statistics.
+- `bool IsClosed`  Indicates if the session is closed.
 
 ### Methods
 - `ValueTask<IDuplexSessionChannel> OpenChannelAsync(SessionChannelOptions options, bool waitForAcknowledgement = false, CancellationToken? cancel = null)`
@@ -23,22 +23,22 @@ The `Session` class represents a Yamux session, allowing multiple logical stream
   - Accepts a new channel with custom options.
 - `ValueTask<IReadOnlySessionChannel> AcceptReadOnlyChannelAsync(CancellationToken? cancel)`
   - Accepts a new channel with read-only semantics.
-- `Task<TimeSpan> PingAsync(CancellationToken cancellation)`
+- `ValueTask<TimeSpan> PingAsync(CancellationToken cancellation)`
   - Sends a ping and returns the round-trip time.
 - `void Start()`
   - Starts the session. Throws `SessionException` if already closed.
-- `Task Close()`
+- `Task CloseAsync()`
   - Closes the session.
-- `Task GoAwayAsync()`
-  - Sends a GoAway frame to the remote peer indication no new channels.`
-- `Task CloseOpenChannelsAsync`
+- `Task GoAwayAsync(SessionTermination sessionTermination = SessionTermination.Normal, CancellationToken? cancel = null)`
+  - Sends a GoAway frame to the remote peer indicating no new channels.
+- `Task<bool> CloseOpenChannelsAsync(TimeSpan timeout)`
   - Tries to gracefully close all open channels on the session.
-- `void Dispose()` / `ValueTask DisposeAsync()`
+- `ValueTask DisposeAsync()`
   - Disposes the session and resources.
 
 ### Exceptions
-- `SessionException` — Thrown for protocol or session errors.
-- `SessionChannelException` — Thrown for channel-specific errors.
+- `SessionException`  Thrown for protocol or session errors.
+- `SessionChannelException`  Thrown for channel-specific errors.
 
 ---
 

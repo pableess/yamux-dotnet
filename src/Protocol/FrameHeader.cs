@@ -1,11 +1,5 @@
-﻿using System;
-using System.Buffers.Binary;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
+﻿using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
-using System.Text;
-using System.Threading.Tasks;
 
 namespace Yamux.Protocol
 {
@@ -51,11 +45,11 @@ namespace Yamux.Protocol
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static void Validate(FrameHeader frameHeader)
         {
-            if (!Enum.IsDefined(frameHeader.Version))
+            if (frameHeader.Version != ProtocolVersion.Initial)
             {
                 throw new SessionException(SessionErrorCode.InvalidVersion, "Invalid version while parsing yamux frame", SessionTermination.ProtocolError);
             }
-            if (!Enum.IsDefined(frameHeader.FrameType))
+            if (frameHeader.FrameType is < FrameType.Data or > FrameType.GoAway)
             {
                 throw new SessionException(SessionErrorCode.InvalidMsgType, "Invalid message type while parsing yamux frame", SessionTermination.ProtocolError);
             }

@@ -30,6 +30,12 @@ namespace Yamux
         /// The underlying session transmission has been closed, so the channel is not operable anymore
         /// </summary>
         SessionClosed,
+
+        /// <summary>
+        /// The channel is not in a valid state for the attempted operation
+        /// </summary>
+        InvalidChannelState,
+
     }
 
 

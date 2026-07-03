@@ -1,37 +1,30 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Diagnostics;
-using System.Linq;
-using System.Text;
+﻿using System.Diagnostics;
 using System.Threading.Channels;
-using System.Threading.Tasks;
 using Yamux.Protocol;
 
 namespace Yamux.Internal
 {
-    internal class ConnectionWriter
+internal class ConnectionWriter
     {
         private readonly ITransport _peer;
-        // private readonly CancellationTokenSource _stoppingToken;
-        private readonly Channel<(Frame frame, ReusableValueTaskSource tcs)> _writeQueue;
+        private readonly Channel<(Frame frame, TaskCompletionSource tcs)> _writeQueue;
         private readonly Statistics? _stats;
-        private readonly ReusableValueTaskSourcePool _tcsPool;
+        private YamuxMetrics? _metrics;
         private Task? _runTask;
+
+        internal void SetMetrics(YamuxMetrics? metrics) => _metrics = metrics;
 
         public ConnectionWriter(ITransport connection, Statistics? stats)
         {
             _peer = connection ?? throw new ArgumentNullException(nameof(connection));
-
             _stats = stats;
+            _metrics = null;
 
-            //_stoppingToken = new CancellationTokenSource();
-            _writeQueue = Channel.CreateBounded<(Frame, ReusableValueTaskSource)>(new BoundedChannelOptions(100)
+            _writeQueue = Channel.CreateBounded<(Frame, TaskCompletionSource)>(new BoundedChannelOptions(100)
             {
                 FullMode = BoundedChannelFullMode.Wait,
                 SingleReader = true,
             });
-
-            _tcsPool = new ReusableValueTaskSourcePool();
         }
 
         public void Start()
@@ -47,6 +40,8 @@ namespace Yamux.Internal
                     {
                         if (_writeQueue.Reader.TryRead(out var item))
                         {
+                            using var _ = item.frame; // dispose buffer owner after write
+
                             try
                             {
                                 item.frame.Header.WriteTo(headerBuffer);
@@ -54,26 +49,28 @@ namespace Yamux.Internal
                                 if (Session.SessionTracer.Switch.ShouldTrace(TraceEventType.Verbose))
                                     Session.SessionTracer.TraceEvent(TraceEventType.Verbose, 0, "[Dbg] yamux: writing frame - {0}, payload size = {1}", item.frame.Header.FrameType, item.frame.Header.Length);
                                 await _peer.WriteAsync(headerBuffer, default);
+                                _metrics?.FramesSent.Add(1);
                                 if (!item.frame.Payload.IsEmpty)
                                 {
                                     await _peer.WriteAsync(item.frame.Payload, default);
 
                                     _stats?.UpdateSent((uint)item.frame.Payload.Length);
+                                    _metrics?.BytesSent.Add(item.frame.Payload.Length);
 
                                 }
-                                item.tcs.SetResult();
+                                item.tcs.TrySetResult();
                             }
                             catch (OperationCanceledException cancelEx)
                             {
                                 if (Session.SessionTracer.Switch.ShouldTrace(TraceEventType.Warning))
                                     Session.SessionTracer.TraceEvent(TraceEventType.Warning, 0, "[Warn] yamux: write operation canceled - {0}", cancelEx.Message);
-                                item.tcs.SetException(cancelEx);
+                                item.tcs.TrySetException(cancelEx);
                             }
                             catch (Exception ex)
                             {
                                 if (Session.SessionTracer.Switch.ShouldTrace(TraceEventType.Error))
                                     Session.SessionTracer.TraceEvent(TraceEventType.Error, 0, "[Err] yamux: error writing frame - {0}", ex.Message);
-                                item.tcs.SetException(ex);
+                                item.tcs.TrySetException(ex);
                             }
                         }
                     }
@@ -92,7 +89,7 @@ namespace Yamux.Internal
 
         public async ValueTask WriteAsync(Frame frame, CancellationToken cancel)
         {
-            var tcs = _tcsPool.Rent();
+            var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
             if (Session.SessionTracer.Switch.ShouldTrace(TraceEventType.Verbose))
                 Session.SessionTracer.TraceEvent(TraceEventType.Verbose, 0, "[Dbg] yamux: Enqueuing frame for write - {0}, payload size = {1}", frame.Header.FrameType, frame.Header.Length);
@@ -113,7 +110,7 @@ namespace Yamux.Internal
             }
 
             // wait for the write to complete
-            await new ValueTask(tcs, tcs.Version);
+            await tcs.Task;
             if (Session.SessionTracer.Switch.ShouldTrace(TraceEventType.Verbose))
                 Session.SessionTracer.TraceEvent(TraceEventType.Verbose, 0, "[Dbg] yamux: Write completed for frame - {0}, payload size = {1}", frame.Header.FrameType, frame.Header.Length);
         }

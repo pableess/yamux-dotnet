@@ -15,15 +15,15 @@ namespace Yamux.Internal
 
         public ReusableValueTaskSource()
         {
-            Reset();
-        }
-
-        public void Reset()
-        {
             _core = new ManualResetValueTaskSourceCore<bool>
             {
                 RunContinuationsAsynchronously = true
             };
+        }
+
+        public void Reset()
+        {
+            _core.Reset();
         }
 
         public void SetResult() => _core.SetResult(true);
@@ -61,7 +61,10 @@ namespace Yamux.Internal
             {
                 _queue.Enqueue(item);
             }
-            Interlocked.Decrement(ref _count);
+            else
+            {
+                Interlocked.Decrement(ref _count);
+            }
         }
     }
 }

@@ -1,10 +1,5 @@
 ﻿using ByteSizeLib;
-using System;
-using System.Collections.Generic;
-using System.Linq;
 using System.Runtime.CompilerServices;
-using System.Text;
-using System.Threading.Tasks;
 
 namespace Yamux
 {
@@ -98,14 +93,16 @@ namespace Yamux
         {
             if (!_cancel.IsCancellationRequested)
             {
-                ulong previousBytesSent = Interlocked.Exchange(ref _previousBytesSent, _totalBytesSent);
-                ulong previousBytesReceived = Interlocked.Exchange(ref _previousBytesReceived, _totalBytesReceived);
+                ulong currentSent = Interlocked.Read(ref _totalBytesSent);
+                ulong currentReceived = Interlocked.Read(ref _totalBytesReceived);
+                ulong previousBytesSent = Interlocked.Exchange(ref _previousBytesSent, currentSent);
+                ulong previousBytesReceived = Interlocked.Exchange(ref _previousBytesReceived, currentReceived);
 
-                ulong bytesSent = _totalBytesSent - previousBytesSent;
-                ulong bytesReceived = _totalBytesReceived - previousBytesReceived;
+                ulong bytesSent = currentSent - previousBytesSent;
+                ulong bytesReceived = currentReceived - previousBytesReceived;
 
-                _currentSendBandwidth = bytesSent / (SampleInterval.TotalSeconds);
-                _currentReceiveBandwidth = bytesReceived / (SampleInterval.TotalSeconds);
+                _currentSendBandwidth = bytesSent / SampleInterval.TotalSeconds;
+                _currentReceiveBandwidth = bytesReceived / SampleInterval.TotalSeconds;
 
                 Sampled?.Invoke(this, EventArgs.Empty);
             }

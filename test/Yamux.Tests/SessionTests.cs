@@ -1,437 +1,698 @@
 ﻿using AwesomeAssertions;
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-using Nerdbank.Streams;
-using AutoBogus;
-using Yamux.Internal;
 using Bogus;
-using System.IO.Pipelines;
+using Nerdbank.Streams;
 using System.Buffers;
-using System.ComponentModel.Design;
-using Bogus.DataSets;
-using System.Net.Sockets;
+using System.IO.Pipelines;
 using System.Net;
-using System.Diagnostics;
+using System.Net.Sockets;
+using System.Text;
+using System.Threading.Channels;
+using Yamux.Internal;
 using Yamux.Protocol;
 
-namespace Yamux.Tests
+namespace Yamux.Tests;
 
+public class SessionTests
 {
-    public class SessionTests
+    [Fact]
+    public async Task SingleOneWayTest()
     {
-        [Fact]
-        public async Task SingleOneWayTest()
+        var faker = new Faker();
+        var data = faker.Random.Chars(count: 1024 * 750);
+        var buffer = Encoding.UTF8.GetBytes(data).AsMemory();
+        var result = new byte[buffer.Length].AsMemory();
+
+        (var client, var server) = FullDuplexStream.CreatePair();
+
+        var serverTask = Task.Run(async () =>
         {
-            var faker = new Faker();
-            
-            var data = faker.Random.Chars(count: 1024 * 750); // 750 KB random string
-            var buffer = Encoding.UTF8.GetBytes(data).AsMemory();
-            var result = new byte[buffer.Length].AsMemory();
+            await using var serverSession = new Session(new StreamPeer(server), false);
+            serverSession.Start();
 
-            // full duplex stream (from nerdback is a way to simulate both ends of network connection)
-            (var client, var server) = FullDuplexStream.CreatePair();
+            using var channel = await serverSession.AcceptAsync();
 
-            // try to open a stream from the client side and 
-            var serverTask = Task.Run(async () =>
+            long index = 0;
+            ReadResult res;
+            do
             {
-                await using var serverSession = new Session(new StreamPeer(server), false);
-                serverSession.Start();
+                res = await channel.Input.ReadAsync();
+                if (res.Buffer.Length > 0)
+                {
+                    res.Buffer.CopyTo(result.Slice((int)index, (int)res.Buffer.Length).Span);
+                    index += res.Buffer.Length;
+                    channel.Input.AdvanceTo(res.Buffer.End, res.Buffer.End);
+                }
+            } while (!res.IsCanceled && !res.IsCompleted);
 
-                using var channel = await serverSession.AcceptAsync();
+            channel.Close();
+            await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
+            channel.Dispose();
+        });
 
+        var clientTask = Task.Run(async () =>
+        {
+            await using var clientSession = new Session(new StreamPeer(client), true);
+            clientSession.Start();
+
+            using var channel = await clientSession.OpenChannelAsync();
+
+            var size = buffer.Length;
+            int current = 0;
+            int chunkSize = 1024 * 4;
+
+            while (current < size)
+            {
+                if (buffer.Length > chunkSize)
+                {
+                    var end = current + chunkSize;
+                    var slice = buffer.Slice(current, end >= buffer.Length ? buffer.Length - current : chunkSize);
+                    await channel.WriteAsync(slice, CancellationToken.None);
+                }
+                current += chunkSize;
+            }
+
+            channel.Close();
+            await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
+        });
+
+        await Task.WhenAll(serverTask, clientTask);
+        result.ToArray().Should().BeEquivalentTo(buffer.ToArray());
+    }
+
+    [Fact]
+    public async Task MultipleOneWay()
+    {
+        var faker = new Faker();
+
+        var data1 = faker.Random.Chars(count: 1024 * 750);
+        var buffer1 = Encoding.UTF8.GetBytes(data1).AsMemory();
+        var result1 = new byte[buffer1.Length].AsMemory();
+
+        var data2 = faker.Random.Chars(count: 1024 * 925);
+        var buffer2 = Encoding.UTF8.GetBytes(data2).AsMemory();
+        var result2 = new byte[buffer2.Length].AsMemory();
+
+        (var client, var server) = FullDuplexStream.CreatePair();
+
+        var serverTask = Task.Run(async () =>
+        {
+            await using var serverSession = new Session(new StreamPeer(server), false);
+            serverSession.Start();
+
+            async Task ReadChannelAsync(IReadOnlySessionChannel channel, Memory<byte> result)
+            {
                 long index = 0;
-
                 ReadResult res;
-
                 do
                 {
                     res = await channel.Input.ReadAsync();
-
                     if (res.Buffer.Length > 0)
                     {
                         res.Buffer.CopyTo(result.Slice((int)index, (int)res.Buffer.Length).Span);
-
                         index += res.Buffer.Length;
-
                         channel.Input.AdvanceTo(res.Buffer.End, res.Buffer.End);
                     }
-
                 } while (!res.IsCanceled && !res.IsCompleted);
 
                 channel.Close();
                 await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
-
                 channel.Dispose();
-            });
+            }
 
-            var clientTask = Task.Run(async () => 
+            using var channel1 = await serverSession.AcceptAsync();
+            var taskA = ReadChannelAsync(channel1, result1);
+            using var channel2 = await serverSession.AcceptAsync();
+            var taskB = ReadChannelAsync(channel2, result2);
+
+            await Task.WhenAll(taskA, taskB);
+        });
+
+        var clientTask = Task.Run(async () =>
+        {
+            await using var clientSession = new Session(new StreamPeer(client), true);
+            clientSession.Start();
+
+            async Task SendOnChannelAsync(Memory<byte> buf)
             {
-                await using var clientSession = new Session(new StreamPeer(client), true);
-                clientSession.Start();
-
                 using var channel = await clientSession.OpenChannelAsync();
-
-                var size = buffer.Length;
+                var size = buf.Length;
                 int current = 0;
                 int chunkSize = 1024 * 4;
 
                 while (current < size)
                 {
-                    if (buffer.Length > chunkSize)
+                    if (buf.Length > chunkSize)
                     {
-                        // check for range
                         var end = current + chunkSize;
-                        var slice = buffer.Slice(current, end >= buffer.Length ? buffer.Length - current : chunkSize);
-                        await channel.WriteAsync(slice, CancellationToken.None);
+                        await channel.WriteAsync(buf.Slice(current, end >= buf.Length ? buf.Length - current : chunkSize), CancellationToken.None);
                     }
                     current += chunkSize;
                 }
 
                 channel.Close();
                 await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
-            });
+            }
 
-            await Task.WhenAll(serverTask, clientTask);
+            var taskA = SendOnChannelAsync(buffer1);
+            var taskB = SendOnChannelAsync(buffer2);
 
-            // assert the byte arrays are the same
-            result.ToArray().Should().BeEquivalentTo(buffer.ToArray());
-        }
+            await Task.WhenAll(taskA, taskB);
+        });
 
-        [Fact]
-        public async Task MultipleOneWay()
+        await Task.WhenAll(serverTask, clientTask);
+
+        result1.ToArray().Should().BeEquivalentTo(buffer1.ToArray());
+        result2.ToArray().Should().BeEquivalentTo(buffer2.ToArray());
+    }
+
+    [Fact]
+    public async Task SessionKillTest()
+    {
+        var faker = new Faker();
+        (var client, var server) = FullDuplexStream.CreatePair();
+
+        var serverTask = Task.Run(async () =>
         {
-            var faker = new Faker();
+            await using var serverSession = new Session(new StreamPeer(server), false);
+            serverSession.Start();
+            using var channel = await serverSession.AcceptAsync();
 
-            var data1 = faker.Random.Chars(count: 1024 * 750); // 750 KB random string
-            var buffer1 = Encoding.UTF8.GetBytes(data1).AsMemory();
-            var result1 = new byte[buffer1.Length].AsMemory();
-
-            var data2 = faker.Random.Chars(count: 1024 * 925); // 925 KB random string
-            var buffer2 = Encoding.UTF8.GetBytes(data1).AsMemory();
-            var result2 = new byte[buffer1.Length].AsMemory();
-
-            // full duplex stream (from nerdback is a way to simulate both ends of network connection)
-            (var client, var server) = FullDuplexStream.CreatePair();
-
-            // try to open a stream from the client side and 
-
-            var serverTask = Task.Run(async () =>
+            Func<Task> read = async () =>
             {
-                await using var serverSession = new Session(new StreamPeer(server), false);
-                serverSession.Start();
-
-                async Task ReadChannelAsync(IReadOnlySessionChannel channel, Memory<byte> result)
-                {
-                    long index = 0;
-
-                    ReadResult res;
-
-                    do
-                    {
-                        res = await channel.Input.ReadAsync();
-
-                        if (res.Buffer.Length > 0)
-                        {
-                            res.Buffer.CopyTo(result.Slice((int)index, (int)res.Buffer.Length).Span);
-
-                            index += res.Buffer.Length;
-
-                            channel.Input.AdvanceTo(res.Buffer.End, res.Buffer.End);
-                        }
-
-                    } while (!res.IsCanceled && !res.IsCompleted);
-
-                    channel.Close();
-                    await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
-                    channel.Dispose();
-                }
-
-                using var channel1 = await serverSession.AcceptAsync();
-                var taskA = ReadChannelAsync(channel1, result1);
-                using var channel2 = await serverSession.AcceptAsync();
-                var taskB = ReadChannelAsync(channel2, result2);
-
-                await Task.WhenAll(taskA, taskB);
-            });
-
-            var clientTask = Task.Run(async () =>
-            {
-                await using var clientSession = new Session(new StreamPeer(client), true);
-                clientSession.Start();
-
-                async Task SendOnChannelAsync(Memory<byte> buffer)
-                {
-                    using var channel = await clientSession.OpenChannelAsync();
-
-                    var size = buffer.Length;
-                    int current = 0;
-                    int chunkSize = 1024 * 4;
-
-                    while (current < size)
-                    {
-                        if (buffer.Length > chunkSize)
-                        {
-                            // check for range
-                            var end = current + chunkSize;
-                            await channel.WriteAsync(buffer.Slice(current, end >= buffer.Length ? buffer.Length - current : chunkSize), CancellationToken.None);
-                        }
-                        current += chunkSize;
-                    }
-
-                    channel.Close();
-                    await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
-                }
-
-                var taskA = SendOnChannelAsync(buffer1);
-                var taskB = SendOnChannelAsync(buffer2);
-
-                await Task.WhenAll(taskA, taskB);
-            });
-
-            await Task.WhenAll(serverTask, clientTask);
-
-            // assert the byte arrays are the same
-            result1.ToArray().Should().BeEquivalentTo(buffer1.ToArray());
-            result2.ToArray().Should().BeEquivalentTo(buffer2.ToArray());
-        }
-
-        [Fact]
-        public async Task SessionKillTest()
-        {
-            var faker = new Faker();
-
-            // full duplex stream (from nerdback is a way to simulate both ends of network connection)
-            (var client, var server) = FullDuplexStream.CreatePair();
-
-            // try to open a stream from the client side and 
-            var serverTask = Task.Run(async () =>
-            {
-                await using var serverSession = new Session(new StreamPeer(server), false);
-                serverSession.Start();
-                using var channel = await serverSession.AcceptAsync();
-
-                Func<Task> read = async () =>
-                {
-                    ReadResult res;
-                    do
-                    {
-                        res = await channel.Input.ReadAsync();
-                        if (res.Buffer.Length > 0)
-                        {
-                            channel.Input.AdvanceTo(res.Buffer.End, res.Buffer.End);
-                        }
-                    } while (!res.IsCanceled && !res.IsCompleted);
-
-                    // done
-                };
-
-                await Assert.ThrowsAsync<SessionException>(read);
-            });
-
-            var clientTask = Task.Run(async () =>
-            {
-                await using var clientSession = new Session(new StreamPeer(client), true);
-                clientSession.Start();
-
-                using var channel = await clientSession.OpenChannelAsync();
-
-                var data = faker.Random.Chars(count: 1024 * 750); // 750 KB random string
-                var buffer = Encoding.UTF8.GetBytes(data).AsMemory();
-
-                await channel.WriteAsync(buffer, CancellationToken.None);
-                await channel.WriteAsync(buffer, CancellationToken.None);
-                await channel.WriteAsync(buffer, CancellationToken.None);
-                await channel.WriteAsync(buffer, CancellationToken.None);
-                await channel.WriteAsync(buffer, CancellationToken.None);
-
-                // kill the session without closing all the channels will cause the channels to fault
-                await clientSession.DisposeAsync();
-            });
-
-            await Task.WhenAll(serverTask, clientTask);
-
-            // assert the byte arrays are the same
-        }
-
-        [Fact]
-        public async Task StreamTest()
-        {
-            var faker = new Faker();
-
-            var data = faker.Random.Chars(count: 1024 * 750); // 750 KB random string
-            var buffer = Encoding.UTF8.GetBytes(data);
-            byte[]? result = null;
-
-            // full duplex stream (from nerdback is a way to simulate both ends of network connection)
-            (var client, var server) = FullDuplexStream.CreatePair();
-
-            // try to open a stream from the client side and 
-
-            var serverTask = Task.Run(async () =>
-            {
-                await using var serverSession = new Session(new StreamPeer(server), false);
-                serverSession.Start();
-                using var channel = await serverSession.AcceptAsync();
-                using var stream = channel.AsStream();
-
-                using MemoryStream ms = new MemoryStream(buffer);
-                await ms.CopyToAsync(stream);
-                
-                channel.Close();
-                await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
-
-                channel.Dispose();
-            });
-
-            var clientTask = Task.Run(async () =>
-            {
-                await using var clientSession = new Session(new StreamPeer(client), true);
-                clientSession.Start();
-
-                using var channel = await clientSession.OpenChannelAsync();
-                using var stream = channel.AsStream();
-
-                using MemoryStream ms = new MemoryStream();
-
-                await stream.CopyToAsync(ms);
-
-                result = ms.ToArray();
-
-                stream.Close();
-            });
-
-            await Task.WhenAll(serverTask, clientTask);
-
-            result.Should().NotBeNull();
-
-            // assert the byte arrays are the same
-            result!.ToArray().Should().BeEquivalentTo(buffer.ToArray());
-        }
-
-        [Fact]
-        public async Task SessionProtoclErrTest() 
-        {
-            (var client, var server) = FullDuplexStream.CreatePair();
-
-            // try to open a stream from the client side and 
-
-            var serverTask = Task.Run(async () =>
-            {
-                await using var serverSession = new Session(new StreamPeer(server), false);
-                serverSession.Start();
-                using var channel = await serverSession.AcceptAsync();
-
-                Func<Task> read = async () =>
-                {
-                    ReadResult res;
-                    do
-                    {
-                        res = await channel.Input.ReadAsync(default);
-                        channel.Input.AdvanceTo(res.Buffer.End, res.Buffer.End);
-
-                    } while (!res.IsCanceled && !res.IsCompleted);
-                };
-
-                // assert that we get a session protocol exception
-                var ex = await Assert.ThrowsAsync<SessionException>(read);
-                ex.ErrorCode.Should().Be(SessionErrorCode.InvalidVersion);
-
-            });
-
-            var clientTask = Task.Run(async () =>
-            {
-                try
-                {
-                    await using var clientSession = new Session(new StreamPeer(client), true);
-                    clientSession.Start();
-
-                    using var channel = await clientSession.OpenChannelAsync();
-
-                    var faker = new Faker();
-                    var data = faker.Random.Chars(count: 1024 * 312); // 312 KB random string
-                    var buffer = Encoding.UTF8.GetBytes(data).AsMemory();
-                    await channel.WriteAsync(buffer, default);
-
-                    // send header with invalid version on the original stream
-                    // do this by directly writing to the underlying stream, bypassing the yamux session
-                    await client.WriteAsync(new byte[] { 0x01, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20 }.AsMemory(), default);
-                    await client.FlushAsync(); // flush to make sure it is available to be read by the other side
-
-                    // try to write more data, which may fail if the other side has already closed the session
-                    await channel.WriteAsync(buffer.Slice(0, 64), default);
-
-                    await Task.Delay(200);
-                    
-                }
-                catch (YamuxException)
-                {
-                    // swallow the exception because the client will have closed when we sent it invalid data
-                }
-            });
-
-            await Task.WhenAll(serverTask, clientTask);
-        }
-
-        [Fact]
-        public async Task BenchmarkTestAsync()
-        {
-            Random r = new Random();
-            var _buffer = new byte[1024 * 32].AsMemory();
-            r.NextBytes(_buffer.Span);
-            using Socket ss = new Socket(SocketType.Stream, ProtocolType.Tcp);
-            ss.Bind(new IPEndPoint(IPAddress.Loopback, 5001));
-            ss.Listen();
-
-            using Socket cs = new Socket(SocketType.Stream, ProtocolType.Tcp);
-            await cs.ConnectAsync(new IPEndPoint(IPAddress.Loopback, 5001));
-
-
-            var serverTask = Task.Run(async () =>
-            {
-                using var ss1 = await ss.AcceptAsync();
-                using Stream server = new NetworkStream(ss1);
-                await using var session = new Session(new StreamPeer(server), false, options: new SessionOptions { DefaultChannelOptions = new SessionChannelOptions { AutoTuneReceiveWindowSize = false, ReceiveWindowSize = uint.MaxValue } });
-                session.Start();
-                using var channel = await session.OpenChannelAsync(false);
-
-                // every 32 iterations is a MB of data (in 32KB chunks)
-                int iterations = 50 * 32;
-                for (int i = 0; i < iterations; i++)
-                {
-                    await channel.WriteAsync(_buffer);
-                }
-
-                channel.Close();
-                await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
-                await session.CloseAsync();
-            });
-
-            var clientTask = Task.Run(async () =>
-            {
-                using Stream client = new NetworkStream(cs);
-                await using var session = new Session(new StreamPeer(client), true, options: new SessionOptions { DefaultChannelOptions = new SessionChannelOptions { AutoTuneReceiveWindowSize = false, ReceiveWindowSize = uint.MaxValue } });
-                session.Start();
-                using var channel = await session.AcceptReadOnlyChannelAsync(null);
-
-                byte[] readBuffer = new byte[1024 * 32];
-
                 ReadResult res;
-
                 do
                 {
-                    res = await channel.Input.ReadAtLeastAsync(1024);
+                    res = await channel.Input.ReadAsync();
+                    if (res.Buffer.Length > 0)
+                        channel.Input.AdvanceTo(res.Buffer.End, res.Buffer.End);
+                } while (!res.IsCanceled && !res.IsCompleted);
+            };
+
+            await read();
+        });
+
+        var clientTask = Task.Run(async () =>
+        {
+            await using var clientSession = new Session(new StreamPeer(client), true);
+            clientSession.Start();
+
+            using var channel = await clientSession.OpenChannelAsync();
+
+            var data = faker.Random.Chars(count: 1024 * 750);
+            var buffer = Encoding.UTF8.GetBytes(data).AsMemory();
+
+            await channel.WriteAsync(buffer, CancellationToken.None);
+            await channel.WriteAsync(buffer, CancellationToken.None);
+            await channel.WriteAsync(buffer, CancellationToken.None);
+            await channel.WriteAsync(buffer, CancellationToken.None);
+            await channel.WriteAsync(buffer, CancellationToken.None);
+
+            await clientSession.DisposeAsync();
+        });
+
+        await Task.WhenAll(serverTask, clientTask);
+    }
+
+    [Fact]
+    public async Task StreamTest()
+    {
+        var faker = new Faker();
+        var data = faker.Random.Chars(count: 1024 * 750);
+        var buffer = Encoding.UTF8.GetBytes(data);
+        byte[]? result = null;
+
+        (var client, var server) = FullDuplexStream.CreatePair();
+
+        var serverTask = Task.Run(async () =>
+        {
+            await using var serverSession = new Session(new StreamPeer(server), false);
+            serverSession.Start();
+            using var channel = await serverSession.AcceptAsync();
+            using var stream = channel.AsStream();
+
+            using MemoryStream ms = new MemoryStream(buffer);
+            await ms.CopyToAsync(stream);
+
+            channel.Close();
+            await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
+            channel.Dispose();
+        });
+
+        var clientTask = Task.Run(async () =>
+        {
+            await using var clientSession = new Session(new StreamPeer(client), true);
+            clientSession.Start();
+
+            using var channel = await clientSession.OpenChannelAsync();
+            using var stream = channel.AsStream();
+
+            using MemoryStream ms = new MemoryStream();
+            await stream.CopyToAsync(ms);
+
+            result = ms.ToArray();
+            stream.Close();
+        });
+
+        await Task.WhenAll(serverTask, clientTask);
+
+        result.Should().NotBeNull();
+        result!.ToArray().Should().BeEquivalentTo(buffer.ToArray());
+    }
+
+    [Fact]
+    public async Task SessionProtoclErrTest()
+    {
+        (var client, var server) = FullDuplexStream.CreatePair();
+
+        var serverTask = Task.Run(async () =>
+        {
+            await using var serverSession = new Session(new StreamPeer(server), false);
+            serverSession.Start();
+            using var channel = await serverSession.AcceptAsync();
+
+            Func<Task> read = async () =>
+            {
+                ReadResult res;
+                do
+                {
+                    res = await channel.Input.ReadAsync(default);
                     channel.Input.AdvanceTo(res.Buffer.End, res.Buffer.End);
-                } while (!res.IsCompleted);
+                } while (!res.IsCanceled && !res.IsCompleted);
+            };
 
-                channel.Close();
-                await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
-                await session.CloseAsync();
+            var ex = await Assert.ThrowsAsync<SessionException>(read);
+            ex.ErrorCode.Should().Be(SessionErrorCode.InvalidVersion);
+        });
+
+        var clientTask = Task.Run(async () =>
+        {
+            try
+            {
+                await using var clientSession = new Session(new StreamPeer(client), true);
+                clientSession.Start();
+
+                using var channel = await clientSession.OpenChannelAsync();
+
+                var faker = new Faker();
+                var data = faker.Random.Chars(count: 1024 * 312);
+                var buffer = Encoding.UTF8.GetBytes(data).AsMemory();
+                await channel.WriteAsync(buffer, default);
+
+                await client.WriteAsync(new byte[] { 0x01, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20 }.AsMemory(), default);
+                await client.FlushAsync();
+
+                await channel.WriteAsync(buffer.Slice(0, 64), default);
+                await Task.Delay(200);
+            }
+            catch (YamuxException)
+            {
+            }
+        });
+
+        await Task.WhenAll(serverTask, clientTask);
+    }
+
+    [Fact]
+    public async Task FinHalfCloseTest()
+    {
+        (var client, var server) = FullDuplexStream.CreatePair();
+        var data = new Faker().Random.Bytes(1024 * 50);
+
+        var serverTask = Task.Run(async () =>
+        {
+            await using var serverSession = new Session(new StreamPeer(server), false);
+            serverSession.Start();
+            using var channel = await serverSession.AcceptAsync();
+
+            byte[] received = new byte[data.Length];
+            long index = 0;
+            ReadResult res;
+            do
+            {
+                res = await channel.Input.ReadAsync();
+                if (res.Buffer.Length > 0)
+                {
+                    res.Buffer.CopyTo(received.AsMemory((int)index, (int)res.Buffer.Length).Span);
+                    index += res.Buffer.Length;
+                    channel.Input.AdvanceTo(res.Buffer.End, res.Buffer.End);
+                }
+            } while (!res.IsCanceled && !res.IsCompleted);
+
+            received.Should().BeEquivalentTo(data);
+
+            channel.Close();
+            await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(5));
+            channel.Dispose();
+        });
+
+        var clientTask = Task.Run(async () =>
+        {
+            await using var clientSession = new Session(new StreamPeer(client), true);
+            clientSession.Start();
+            using var channel = await clientSession.OpenChannelAsync();
+
+            await channel.WriteAsync(data, CancellationToken.None);
+
+            // half-close: close write side
+            channel.Close();
+
+            // verify write throws after close
+            Func<Task> writeAfterClose = () => channel.WriteAsync(new byte[1], CancellationToken.None).AsTask();
+            await writeAfterClose.Should().ThrowAsync<SessionChannelException>();
+
+            await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(5));
+            channel.Dispose();
+        });
+
+        await Task.WhenAll(serverTask, clientTask);
+    }
+
+    [Fact]
+    public async Task RstOnAbortTest()
+    {
+        (var client, var server) = FullDuplexStream.CreatePair();
+        var data = new Faker().Random.Bytes(1024 * 50);
+
+        var serverTask = Task.Run(async () =>
+        {
+            await using var serverSession = new Session(new StreamPeer(server), false);
+            serverSession.Start();
+            using var channel = await serverSession.AcceptAsync();
+
+            try
+            {
+                ReadResult res;
+                do
+                {
+                    res = await channel.Input.ReadAsync();
+                    if (res.Buffer.Length > 0)
+                        channel.Input.AdvanceTo(res.Buffer.End, res.Buffer.End);
+                } while (!res.IsCanceled && !res.IsCompleted);
+            }
+            catch (SessionChannelException)
+            {
+            }
+
+            channel.Dispose();
+        });
+
+        var clientTask = Task.Run(async () =>
+        {
+            await using var clientSession = new Session(new StreamPeer(client), true);
+            clientSession.Start();
+            using var channel = await clientSession.OpenChannelAsync();
+
+            await channel.WriteAsync(data, CancellationToken.None);
+
+            channel.Abort();
+
+            Func<Task> readAfterAbort = async () =>
+            {
+                var res = await channel.Input.ReadAsync();
+                channel.Input.AdvanceTo(res.Buffer.End, res.Buffer.End);
+            };
+            (await readAfterAbort.Should().ThrowAsync<Exception>()).Which.Should().BeOfType<SessionChannelException>();
+        });
+
+        await Task.WhenAll(serverTask, clientTask);
+    }
+
+    [Fact]
+    public async Task FlowControlBackpressureTest()
+    {
+        (var client, var server) = FullDuplexStream.CreatePair();
+        var buffer = new byte[1024 * 16];
+
+        var serverTask = Task.Run(async () =>
+        {
+            await using var serverSession = new Session(new StreamPeer(server), false, options: new SessionOptions
+            {
+                DefaultChannelOptions = new SessionChannelOptions
+                {
+                    AutoTuneReceiveWindowSize = false,
+                }
             });
+            serverSession.Start();
+            using var channel = await serverSession.AcceptAsync();
 
-            await Task.WhenAll(serverTask, clientTask);
-        }
+            // don't read - this exhausts the remote window
+            await Task.Delay(3000);
+            channel.Dispose();
+        });
+
+        var clientTask = Task.Run(async () =>
+        {
+            await using var clientSession = new Session(new StreamPeer(client), true, options: new SessionOptions
+            {
+                DefaultChannelOptions = new SessionChannelOptions
+                {
+                    AutoTuneReceiveWindowSize = false,
+                }
+            });
+            clientSession.Start();
+            using var channel = await clientSession.OpenChannelAsync();
+
+            // write enough to exhaust the 256KB window
+            for (int i = 0; i < 16; i++)
+            {
+                await channel.WriteAsync(buffer, CancellationToken.None);
+            }
+
+            // next write should block because window is exhausted
+            var blockedWrite = channel.WriteAsync(buffer, CancellationToken.None).AsTask();
+            var timeout = Task.Delay(1000);
+            var completed = await Task.WhenAny(blockedWrite, timeout);
+
+            completed.Should().Be(timeout);
+        });
+
+        await Task.WhenAll(serverTask, clientTask);
+    }
+
+    [Fact]
+    public async Task GoAwayRejectsNewChannelsTest()
+    {
+        (var client, var server) = FullDuplexStream.CreatePair();
+
+        var serverTask = Task.Run(async () =>
+        {
+            await using var serverSession = new Session(new StreamPeer(server), false);
+            serverSession.Start();
+
+            using var channel1 = await serverSession.AcceptAsync();
+            await serverSession.GoAwayAsync();
+
+            await channel1.WriteAsync(new byte[64], CancellationToken.None);
+
+            channel1.Close();
+            await channel1.WhenRemoteCloseAsync(TimeSpan.FromSeconds(5));
+            channel1.Dispose();
+        });
+
+        var clientTask = Task.Run(async () =>
+        {
+            await using var clientSession = new Session(new StreamPeer(client), true);
+            clientSession.Start();
+
+            using var channel1 = await clientSession.OpenChannelAsync();
+            await Task.Delay(500);
+
+            Func<Task> openAfterGoAway = () => clientSession.OpenChannelAsync(false).AsTask();
+            await openAfterGoAway.Should().ThrowAsync<SessionException>();
+
+            ReadResult res;
+            do
+            {
+                res = await channel1.Input.ReadAsync();
+                if (res.Buffer.Length > 0)
+                    channel1.Input.AdvanceTo(res.Buffer.End, res.Buffer.End);
+            } while (!res.IsCanceled && !res.IsCompleted);
+
+            channel1.Close();
+            await channel1.WhenRemoteCloseAsync(TimeSpan.FromSeconds(5));
+            channel1.Dispose();
+        });
+
+        await Task.WhenAll(serverTask, clientTask);
+    }
+
+    [Fact]
+    public async Task BidirectionalDataTest()
+    {
+        (var client, var server) = FullDuplexStream.CreatePair();
+        var clientToServer = new Faker().Random.Bytes(1024 * 100);
+        var serverToClient = new Faker().Random.Bytes(1024 * 100);
+
+        byte[]? serverReceived = null;
+        byte[]? clientReceived = null;
+
+        var serverTask = Task.Run(async () =>
+        {
+            await using var serverSession = new Session(new StreamPeer(server), false);
+            serverSession.Start();
+            using var channel = await serverSession.AcceptAsync();
+
+            await channel.WriteAsync(serverToClient, CancellationToken.None);
+            channel.Close();
+
+            var ms = new MemoryStream();
+            await channel.Input.CopyToAsync(ms);
+            serverReceived = ms.ToArray();
+
+            await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(5));
+            channel.Dispose();
+        });
+
+        var clientTask = Task.Run(async () =>
+        {
+            await using var clientSession = new Session(new StreamPeer(client), true);
+            clientSession.Start();
+            using var channel = await clientSession.OpenChannelAsync();
+
+            await channel.WriteAsync(clientToServer, CancellationToken.None);
+            channel.Close();
+
+            var ms = new MemoryStream();
+            await channel.Input.CopyToAsync(ms);
+            clientReceived = ms.ToArray();
+
+            await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(5));
+            channel.Dispose();
+        });
+
+        await Task.WhenAll(serverTask, clientTask);
+
+        clientReceived.Should().NotBeNull();
+        serverReceived.Should().NotBeNull();
+        clientReceived.Should().BeEquivalentTo(serverToClient);
+        serverReceived.Should().BeEquivalentTo(clientToServer);
+    }
+
+    [Fact]
+    public async Task OpenChannelWaitForAckTest()
+    {
+        (var client, var server) = FullDuplexStream.CreatePair();
+        using var clientOpened = new ManualResetEventSlim(false);
+
+        var serverTask = Task.Run(async () =>
+        {
+            await using var serverSession = new Session(new StreamPeer(server), false);
+            serverSession.Start();
+            using var channel = await serverSession.AcceptAsync();
+
+            clientOpened.Wait(10000);
+
+            byte[] received = new byte[64];
+            long index = 0;
+            ReadResult res;
+            do
+            {
+                res = await channel.Input.ReadAsync();
+                if (res.Buffer.Length > 0)
+                {
+                    res.Buffer.CopyTo(received.AsMemory((int)index).Span);
+                    index += res.Buffer.Length;
+                    channel.Input.AdvanceTo(res.Buffer.End, res.Buffer.End);
+                }
+            } while (!res.IsCanceled && !res.IsCompleted);
+
+            channel.Close();
+            await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(10));
+            channel.Dispose();
+        });
+
+        var clientTask = Task.Run(async () =>
+        {
+            await using var clientSession = new Session(new StreamPeer(client), true);
+            clientSession.Start();
+
+            using var channel = await clientSession.OpenChannelAsync(waitForAcknowledgement: true);
+            clientOpened.Set();
+
+            await channel.WriteAsync(new byte[64], CancellationToken.None);
+
+            channel.Close();
+            await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(10));
+
+            await Task.Delay(2000);
+            channel.Dispose();
+        });
+
+        await Task.WhenAll(serverTask, clientTask);
+    }
+
+    [Fact]
+    public async Task ZeroByteWriteTest()
+    {
+        (var client, var server) = FullDuplexStream.CreatePair();
+
+        var serverTask = Task.Run(async () =>
+        {
+            await using var serverSession = new Session(new StreamPeer(server), false);
+            serverSession.Start();
+            using var channel = await serverSession.AcceptAsync();
+
+            await Task.Delay(500);
+
+            channel.Close();
+            await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(5));
+            channel.Dispose();
+        });
+
+        var clientTask = Task.Run(async () =>
+        {
+            await using var clientSession = new Session(new StreamPeer(client), true);
+            clientSession.Start();
+            using var channel = await clientSession.OpenChannelAsync();
+
+            await channel.WriteAsync(ReadOnlyMemory<byte>.Empty, CancellationToken.None);
+
+            channel.Close();
+            await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(5));
+            channel.Dispose();
+        });
+
+        await Task.WhenAll(serverTask, clientTask);
+    }
+
+    [Fact]
+    public async Task LargePayloadMultiFrameTest()
+    {
+        var data = new Faker().Random.Bytes(10 * 1024 * 1024);
+        (var client, var server) = FullDuplexStream.CreatePair();
+        byte[]? result = null;
+
+        var serverTask = Task.Run(async () =>
+        {
+            await using var serverSession = new Session(new StreamPeer(server), false);
+            serverSession.Start();
+            using var channel = await serverSession.AcceptAsync();
+
+            var ms = new MemoryStream();
+            await channel.Input.CopyToAsync(ms);
+            result = ms.ToArray();
+
+            channel.Close();
+            await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(30));
+            channel.Dispose();
+        });
+
+        var clientTask = Task.Run(async () =>
+        {
+            await using var clientSession = new Session(new StreamPeer(client), true);
+            clientSession.Start();
+            using var channel = await clientSession.OpenChannelAsync();
+
+            await channel.WriteAsync(data, CancellationToken.None);
+
+            channel.Close();
+            await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(30));
+            channel.Dispose();
+        });
+
+        await Task.WhenAll(serverTask, clientTask);
+
+        result.Should().NotBeNull();
+        result.Should().BeEquivalentTo(data);
     }
 }

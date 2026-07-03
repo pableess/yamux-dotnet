@@ -1,10 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-
-namespace Yamux;
+﻿namespace Yamux;
 
 public class SessionOptions
 {
@@ -16,9 +10,14 @@ public class SessionOptions
 
     public TimeSpan StreamCloseTimeout { get; set; } = TimeSpan.FromMinutes(5);
 
-    public TimeSpan StreamSendTimout { get; set; } = TimeSpan.FromSeconds(75);
+    public TimeSpan StreamSendTimeout { get; set; } = TimeSpan.FromSeconds(75);
 
     public SessionChannelOptions DefaultChannelOptions { get; set; } = new SessionChannelOptions();
+
+    /// <summary>
+    /// Maximum number of concurrent channels (streams). Exceeding this will cause new channels to be rejected with RST.
+    /// </summary>
+    public int MaxChannels { get; set; } = 1024;
 
     /// <summary>
     /// Enables statistics
@@ -29,4 +28,9 @@ public class SessionOptions
     /// How often to sample the statistics
     /// </summary>
     public int StatisticsSampleInterval { get; set; } = 1000;
+
+    /// <summary>
+    /// Enables OpenTelemetry-compatible metrics via System.Diagnostics.Metrics
+    /// </summary>
+    public bool EnableMetrics { get; set; } = true;
 }
