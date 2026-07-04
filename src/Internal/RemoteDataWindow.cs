@@ -170,7 +170,7 @@ internal class RemoteDataWindow(uint defaultSize = 256 * 1024) : IDisposable
 
     private class SyncWaiter(uint requested) : Waiter
     {
-        private readonly object _monitor = new object();
+        private readonly ManualResetEventSlim _signal = new ManualResetEventSlim(false);
         private uint _signaled;
         public override uint Requested => requested;
 
@@ -178,29 +178,19 @@ internal class RemoteDataWindow(uint defaultSize = 256 * 1024) : IDisposable
         public override void Signal(uint available)
         {
             _signaled = available;
-            lock (_monitor)
-            {
-                Monitor.Pulse(_monitor);
-            }
+            _signal.Set();
         }
 
         public override void SignalDisposed()
         {
-            lock (_monitor)
-            {
-                Monitor.Pulse(_monitor);
-            }
+            _signal.Set();
         }
 
         public uint Wait(TimeSpan? timeout = null)
         {
-            lock (_monitor)
+            if (!_signal.Wait(timeout ?? Timeout.InfiniteTimeSpan))
             {
-                var acquired = timeout == null ? Monitor.Wait(_monitor) : Monitor.Wait(_monitor, (int)timeout.Value.TotalMilliseconds);
-                if (!acquired)
-                {
-                    throw new TimeoutException("Timeout error");
-                }
+                throw new TimeoutException("Timeout error");
             }
 
             return _signaled > Requested ? Requested : _signaled;
