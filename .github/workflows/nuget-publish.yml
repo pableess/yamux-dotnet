@@ -17,6 +17,7 @@ permissions:
 jobs:
   build:
     permissions:
+      contents: write  # Ensure write permission in job context
       id-token: write  # enable GitHub OIDC token issuance for this job
       
     runs-on: ubuntu-latest
@@ -48,8 +49,12 @@ jobs:
         if: (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release') || startsWith(github.ref, 'refs/tags/v'))
         run: dotnet nuget push ./nupkg/*.nupkg ./nupkg/*.snupkg --skip-duplicate --source https://api.nuget.org/v3/index.json --api-key ${{ steps.login.outputs.NUGET_API_KEY }}
       - name: Create Git Tag
-        if: (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release') ||  startsWith(github.ref, 'refs/tags/v'))
+        if: (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release') || startsWith(github.ref, 'refs/tags/v'))
         run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
           git tag v$VERSION
           git push origin v$VERSION
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
