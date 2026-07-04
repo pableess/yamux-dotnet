@@ -18,10 +18,6 @@ Yamux.NET is a .NET 9 library implementing the [Yamux multiplexing protocol](htt
 ## Getting Started
 
 ### Install
-Add a reference to the `Yamux` project or build from source for .NET 9.
-
-
-## NuGet
 
 ```
 dotnet add package Yamux --prerelease
