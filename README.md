@@ -1,4 +1,4 @@
-# Yamux.NET
+# Yamux (dotnet)
 
 > This library is not yet production ready.  Api may change prior to 1.0 release.  Please use with caution and provide feedback.
 >
