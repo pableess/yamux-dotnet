@@ -25,7 +25,7 @@ namespace Yamux
         SessionShutdown,
 
         /// <summary>
-        /// The remote peer is no longer acceepting new channels
+        /// The remote peer is no longer accepting new channels
         /// </summary>
         RemoteGoAway,
 

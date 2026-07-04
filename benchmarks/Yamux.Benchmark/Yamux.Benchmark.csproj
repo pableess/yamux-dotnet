@@ -12,7 +12,8 @@
     <PackageReference Include="Nerdbank.Streams" Version="2.11.79" />
   </ItemGroup>
 
-  <ItemGroup>   
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Yamux.csproj" />
   </ItemGroup>
 
 </Project>

@@ -48,6 +48,22 @@ public interface ISessionChannel : IDisposable
     public Task<bool> WhenRemoteCloseAsync(TimeSpan timeout);
 
     /// <summary>
+    /// Waits until the remote peer has acknowledged the channel open
+    /// Only use when channel was accepted without waiting for ack
+    /// </summary>
+    /// <param name="timeout">A maximum amount of time to wait</param>
+    /// <returns>true if the remote peer has acknowledged, false if the operation has timed out</returns>
+    public bool WaitForRemoteAck(TimeSpan timeout);
+
+    /// <summary>
+    /// Returns a task that completes when the remote peer has acknowledged the channel.
+    /// Use with caution as remote peer may fail to send proper acknowledgement
+    /// </summary>
+    /// <param name="timeout"></param>
+    /// <returns>True if the remote peer has acknowledged before the timeout, false if the timeout was reached</returns>
+    public Task<bool> WhenRemoteAckAsync(TimeSpan timeout);
+
+    /// <summary>
     /// Ensures that all written data is flushed in the underlying session connection
     /// </summary>
     /// <param name="cancel"></param>

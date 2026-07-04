@@ -54,9 +54,9 @@ public class SessionChannelOptions
 
     public void Validate()
     {
-        if (ReceiveWindowSize < (10 * 1024)) 
+        if (ReceiveWindowSize < (10 * 1024))
         {
-            throw new ValidationException("ReceiveWindowSize must be greater than 258 KB");
+            throw new ValidationException($"ReceiveWindowSize must be at least 10 KB, but was {ReceiveWindowSize}");
         }
         if (AutoTuneReceiveWindowSize && ReceiveWindowSize > ReceiveWindowUpperBound) 
         {

@@ -8,6 +8,7 @@ This documentation provides an overview of the public APIs for the Yamux .NET li
 - [SessionOptions](SessionOptions.md)
 - [Statistics](Statistics.md)
 - [ISessionChannel and Channel Interfaces](Channels.md)
+- [Transport](Transport.md)
 - [Exceptions](Exceptions.md)
 
 ---
@@ -91,7 +92,7 @@ async Task HandleChannelAsync(ISessionChannel channel)
     finally
     {
         // Properly close and dispose the channel
-        await channel.CloseAsync();
+        channel.Close();
         channel.Dispose();
     }
 }
@@ -121,12 +122,12 @@ await stream.FlushAsync();
 It is important to properly close and dispose of channels when you are done with them to free resources and signal the remote peer:
 
 ```csharp
-// Gracefully close the channel
+// Gracefully close the channel (write side)
 channel.Close();
 
 // either continue reading data from the input pipe until it is completed
 // or you can separately wait for the remote peer to acknowledge the close
-channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(5));
+await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(5));
 
 // Dispose the channel to release resources
 channel.Dispose();
@@ -139,7 +140,7 @@ using (var channel = await yamuxSession.OpenChannelAsync())
 {
     // Use the channel
     // ...
-    await channel.CloseAsync();
+    channel.Close();
 }
 ```
 
@@ -150,8 +151,8 @@ When opening a new channel, you can specify custom options:
 ```csharp
 var options = new SessionChannelOptions
 {
-    WindowSize = 256 * 1024,  // 256KB window size
-    ReceiveBufferSize = 64 * 1024  // 64KB receive buffer
+    ReceiveWindowSize = 256 * 1024,  // 256KB window size
+    ReceiveWindowUpperBound = 4 * 1024 * 1024  // 4MB receive window upper bound
 };
 
 var channel = await yamuxSession.OpenChannelAsync(options);

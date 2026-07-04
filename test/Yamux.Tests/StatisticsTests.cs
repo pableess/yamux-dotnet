@@ -47,16 +47,17 @@ namespace Yamux.Tests
         {
             var stats = new Statistics(1000, default);
             stats.UpdateSent(500);
-            await Task.Delay(1010); // Wait for the sample interval
+            await Task.Delay(1100);
             stats.SendRate.Bytes.Should().Be(500);
         }
 
         [Fact]
         public async Task ReceiveRate_ShouldBeCalculatedCorrectly()
         {
-            _statistics.UpdateReceived(2000);
-            await Task.Delay(1000); // Wait for the sample interval
-            _statistics.ReceiveRate.Bytes.Should().BeApproximately(2000, 1);
+            var stats = new Statistics(1000, default);
+            stats.UpdateReceived(2000);
+            await Task.Delay(1100);
+            stats.ReceiveRate.Bytes.Should().Be(2000);
         }
 
         [Fact]

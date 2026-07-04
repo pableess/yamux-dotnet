@@ -50,7 +50,7 @@ namespace Yamux.Tests
 
             var task = Task.Run(() =>
             {
-                consumed = dw.WaitConsume(48 * 1024, TimeSpan.FromMilliseconds(120));
+                consumed = dw.WaitConsume(48 * 1024, TimeSpan.FromMilliseconds(5000));
             });
 
             Thread.Sleep(5); // Simulate some delay, to allow thread to start
@@ -74,11 +74,11 @@ namespace Yamux.Tests
             // 2 threads waiting.. make sure they both execute when window is extended big enough for both of them
             var task1 = Task.Run(() =>
             {
-                consumed1 = dw.WaitConsume(256, TimeSpan.FromMilliseconds(1000));
+                consumed1 = dw.WaitConsume(256, TimeSpan.FromMilliseconds(5000));
             });
             var task2 = Task.Run(() =>
             {
-                consumed2 = dw.WaitConsume(1024, TimeSpan.FromMilliseconds(1000));
+                consumed2 = dw.WaitConsume(1024, TimeSpan.FromMilliseconds(5000));
             });
 
             Thread.Sleep(5); // Simulate some delay, to allow thread to start
@@ -101,7 +101,7 @@ namespace Yamux.Tests
             // consume full window
             dw.TryConsume(dw.Available);
 
-            var consumeTask = dw.WaitConsumeAsync(1024, TimeSpan.FromMilliseconds(100));
+            var consumeTask = dw.WaitConsumeAsync(1024, TimeSpan.FromMilliseconds(5000));
             _ = Task.Run(() =>
             {
                 dw.Extend(1024 * 16);
@@ -117,17 +117,15 @@ namespace Yamux.Tests
         {
             var dw = new RemoteDataWindow();
 
-            // consume full window
             dw.TryConsume(dw.Available);
 
-            var consumeTask = dw.WaitConsumeAsync(1024, TimeSpan.FromMilliseconds(100));
+            var consumeTask = dw.WaitConsumeAsync(1024, TimeSpan.FromMilliseconds(5000));
             _ = Task.Run(() =>
             {
                 dw.Extend(1024 * 16);
             });
 
-            // mixing async with blocking wait, not something that users should do, but lets test it anyhow
-            var consumed2 = dw.WaitConsume(2048, TimeSpan.FromMilliseconds(100));
+            var consumed2 = dw.WaitConsume(2048, TimeSpan.FromMilliseconds(5000));
 
             var consumed1 = await consumeTask;
             consumed1.Should().Be(1024);

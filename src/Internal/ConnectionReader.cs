@@ -1,10 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Numerics;
-using System.Runtime.CompilerServices;
-using System.Text;
-using System.Threading.Tasks;
+﻿using System.Runtime.CompilerServices;
 using Yamux.Protocol;
 
 namespace Yamux.Internal
@@ -64,9 +58,14 @@ namespace Yamux.Internal
             int bytesRead = 0;
             do
             {
-                bytesRead += await _peer.ReadAsync(data.Slice(bytesRead, requested - bytesRead), cancel);
+                var read = await _peer.ReadAsync(data.Slice(bytesRead, requested - bytesRead), cancel);
+                if (read == 0)
+                {
+                    throw new SessionException(SessionErrorCode.StreamClosed, "Remote connection closed");
+                }
+                bytesRead += read;
             }
-            while (bytesRead > 0 && bytesRead < requested);
+            while (bytesRead < requested);
 
             return bytesRead;
         }
