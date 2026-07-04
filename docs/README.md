@@ -8,6 +8,7 @@ This documentation provides an overview of the public APIs for the Yamux .NET li
 - [SessionOptions](SessionOptions.md)
 - [Statistics](Statistics.md)
 - [ISessionChannel and Channel Interfaces](Channels.md)
+- [Transport](Transport.md)
 - [Exceptions](Exceptions.md)
 
 ---

@@ -39,6 +39,56 @@ await channel.WriteAsync(data, cancellationToken);
 var result = await channel.Input.ReadAsync(cancellationToken);
 ```
 
+### Server / Client Setup
+
+```csharp
+// Server side
+var listener = new TcpListener(IPAddress.Loopback, 5000);
+listener.Start();
+var clientSocket = await listener.AcceptSocketAsync();
+await using var session = clientSocket.AsYamuxSession(isClient: false);
+session.Start();
+
+// Accept incoming channels
+var channel = await session.AcceptAsync();
+var stream = channel.AsStream();
+// Use the stream...
+```
+
+```csharp
+// Client side
+using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+await socket.ConnectAsync(IPAddress.Loopback, 5000);
+await using var session = socket.AsYamuxSession(isClient: true);
+session.Start();
+
+var channel = await session.OpenChannelAsync();
+// Read/write via channel.Input / channel.WriteAsync
+```
+
+### Stream Wrapper
+
+```csharp
+// Convert any channel to a System.IO.Stream
+using var stream = channel.AsStream();
+
+// Works with anything that expects a Stream
+await stream.WriteAsync(data);
+var bytesRead = await stream.ReadAsync(buffer);
+```
+
+### Channel Options
+
+```csharp
+var channel = await session.OpenChannelAsync(new SessionChannelOptions
+{
+    ReceiveWindowSize = 512 * 1024,       // 512KB initial window
+    ReceiveWindowUpperBound = 8 * 1024 * 1024, // 8MB max window
+    MaxDataFrameSize = 32 * 1024,         // 32KB max frame payload
+    AutoTuneReceiveWindowSize = true,
+});
+```
+
 See `samples/Sample` and `samples/FileTransfer` for more complete examples.
 
 ## Protocol
@@ -53,6 +103,7 @@ This library implements the [Yamux protocol specification](https://github.com/ha
 | [SessionChannelOptions](docs/SessionChannelOptions.md) | Per-channel configuration (window sizes, auto-tuning) |
 | [Channels](docs/Channels.md) | ISessionChannel, IReadOnlySessionChannel, IWriteOnlySessionChannel, IDuplexSessionChannel |
 | [Statistics](docs/Statistics.md) | Bandwidth tracking, send/receive rates, Sampled event |
+| [Transport](docs/Transport.md) | Implementing custom transports (ITransport interface) |
 | [Exceptions](docs/Exceptions.md) | YamuxException, SessionException, SessionChannelException, error codes |
 
 
