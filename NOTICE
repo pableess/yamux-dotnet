@@ -1,0 +1,13 @@
+THIRD-PARTY SOFTWARE NOTICES AND INFORMATION
+Do Not Translate or Localize
+
+This project incorporates components from the projects listed below. 
+The original copyright notices and the licenses under which this project 
+received such components are set forth below.
+-------------------------------------------------------------------------
+This product bundles the following third-party components:
+
+1. ByteSize
+   Copyright (c) 2013-2022 Omar Khudeira
+   Licensed under the MIT license
+   See: https://github.com/omar/ByteSize
