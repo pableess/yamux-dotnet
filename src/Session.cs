@@ -131,9 +131,9 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
         {
             var channel = await _channelManager.WaitForAcceptAsync(cancel ?? CancellationToken.None);
 
-            if (this.IsClosed || channel.IsClosed)
+            if (this.IsClosed)
             {
-                throw new SessionException(SessionErrorCode.SessionShutdown, "Session or channel has been closed");
+                throw new SessionException(SessionErrorCode.SessionShutdown, "Session has been closed");
             }
 
             channel.Accept();
