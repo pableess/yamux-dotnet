@@ -1,8 +1,10 @@
-﻿using BenchmarkDotNet.Attributes;
+using BenchmarkDotNet.Attributes;
 using BenchmarkDotNet.Configs;
 using BenchmarkDotNet.Engines;
 using BenchmarkDotNet.Running;
+using System.Diagnostics;
 using System.IO.Pipelines;
+using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 
@@ -27,9 +29,11 @@ namespace Yamux.Benchmark
         }
 
         [SimpleJob(RunStrategy.Throughput, launchCount: 1, warmupCount: 3, invocationCount: 5)]
+        [MemoryDiagnoser]
         public class Yamux
         {
             private Memory<byte> _buffer;
+            private string? _goServerPath;
 
             [Params(1, 50, 500)]
             public int MBs = 50;
@@ -57,6 +61,12 @@ namespace Yamux.Benchmark
                 _serverSock.Listen();
 
                 _port = ((IPEndPoint)_serverSock.LocalEndPoint!).Port;
+
+                var dir = new DirectoryInfo(AppContext.BaseDirectory);
+                while (dir != null && !dir.EnumerateFiles("Yamux.sln").Any())
+                    dir = dir.Parent;
+                var repoRoot = dir?.FullName ?? throw new InvalidOperationException("Cannot find Yamux.sln");
+                _goServerPath = Path.Combine(repoRoot, "benchmarks", "bin", "go-server.exe");
             }
 
             [GlobalCleanup]
@@ -200,6 +210,102 @@ namespace Yamux.Benchmark
                 });
 
                 await Task.WhenAll(serverTask, clientTask);
+            }
+
+            [Benchmark]
+            public async Task CsharpToGoAsync()
+            {
+                using var goServer = GoServerProcess.Start(_goServerPath!);
+
+                var clientTask = Task.Run(async () =>
+                {
+                    var sock = new Socket(SocketType.Stream, ProtocolType.Tcp);
+                    await sock.ConnectAsync(new IPEndPoint(IPAddress.Loopback, goServer.Port));
+
+                    var opt = new SessionOptions
+                    {
+                        EnableKeepAlive = false,
+                        DefaultChannelOptions = new SessionChannelOptions
+                        {
+                            MaxDataFrameSize = 1024 * 64,
+                        }
+                    };
+                    var session = sock!.AsYamuxSession(true, options: opt, keepOpen: false);
+                    session.Start();
+
+                    List<Task> channels = new List<Task>();
+                    int iterationsPerStream = (MBs * 32) / Streams;
+
+                    for (int i = 0; i < Streams; i++)
+                    {
+                        channels.Add(Task.Run(async () =>
+                        {
+                            using var channel = await session.OpenChannelAsync(false);
+
+                            for (int j = 0; j < iterationsPerStream; j++)
+                            {
+                                await channel.WriteAsync(_buffer);
+                            }
+
+                            var timeout = (await channel.WhenRemoteAckAsync(TimeSpan.FromSeconds(3)) == false);
+                            if (timeout)
+                            {
+                                throw new TimeoutException("Timed out waiting for remote ack");
+                            }
+
+                            channel.Close();
+                        }));
+                    }
+
+                    await Task.WhenAll(channels);
+
+                    sock.Close();
+                });
+
+                await clientTask;
+            }
+        }
+
+        internal sealed class GoServerProcess : IDisposable
+        {
+            private readonly Process _process;
+            public int Port { get; }
+
+            public static GoServerProcess Start(string exePath)
+            {
+                var psi = new ProcessStartInfo(exePath)
+                {
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                };
+                var proc = Process.Start(psi) ?? throw new InvalidOperationException("Failed to start Go server");
+
+                var line = proc.StandardOutput.ReadLine() ?? "";
+                if (!line.StartsWith("LISTENING:"))
+                {
+                    proc.Kill();
+                    throw new InvalidOperationException($"Unexpected output: {line}");
+                }
+                var port = int.Parse(line.AsSpan("LISTENING:".Length));
+                return new GoServerProcess(proc, port);
+            }
+
+            private GoServerProcess(Process process, int port)
+            {
+                _process = process;
+                Port = port;
+            }
+
+            public void Dispose()
+            {
+                if (!_process.HasExited)
+                {
+                    _process.Kill();
+                    _process.WaitForExit(2000);
+                }
+                _process.Dispose();
             }
         }
     }
