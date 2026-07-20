@@ -188,6 +188,8 @@ internal class FrameReader
             {
                 try
                 {
+                    await channel.WaitForPendingFlushAsync().ConfigureAwait(false);
+
                     var pipeWriter = channel.GetPipeWriter();
                     var buffer = pipeWriter.GetMemory();
 
@@ -207,14 +209,19 @@ internal class FrameReader
 
                     bytesToRead -= read;
 
-                    var flushResult = await pipeWriter.FlushAsync(cancellationToken).ConfigureAwait(false);
+                    var flushTask = pipeWriter.FlushAsync(cancellationToken);
 
-                    if (flushResult.IsCompleted)
+                    if (flushTask.IsCompletedSuccessfully)
                     {
-                        channel.CloseWrite();
-
-                        await pipeWriter.CompleteAsync();
-
+                        if (flushTask.Result.IsCompleted)
+                        {
+                            channel.CloseWrite();
+                            await pipeWriter.CompleteAsync().ConfigureAwait(false);
+                        }
+                    }
+                    else
+                    {
+                        channel.OffloadPipeFlush(flushTask, pipeWriter);
                     }
                 }
                 catch (InvalidOperationException)

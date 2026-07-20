@@ -11,6 +11,11 @@ public class SessionOptions
     public int AcceptBacklog { get; set; } = 256;
 
     /// <summary>
+    /// The maximum number of outgoing frames to buffer in the write queue before applying backpressure.
+    /// </summary>
+    public int WriteQueueDepth { get; set; } = 100;
+
+    /// <summary>
     /// Whether to enable keep-alive pings to detect dead connections.
     /// </summary>
     public bool EnableKeepAlive { get; set; } = true;

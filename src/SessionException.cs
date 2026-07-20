@@ -7,79 +7,104 @@ using Yamux.Protocol;
 
 namespace Yamux
 {
+    /// <summary>
+    /// Defines error codes for session-level errors.
+    /// </summary>
     public enum SessionErrorCode 
     {
         /// <summary>
-        /// Invalid frame
+        /// The received frame has an invalid protocol version.
         /// </summary>
         InvalidVersion,
 
         /// <summary>
-        /// Invalid frame message type
+        /// The received frame has an invalid message type.
         /// </summary>
         InvalidMsgType,
 
         /// <summary>
-        /// The session has been closed
+        /// The session has been shut down.
         /// </summary>
         SessionShutdown,
 
         /// <summary>
-        /// The remote peer is no longer accepting new channels
+        /// The remote peer sent a GoAway and is no longer accepting new channels.
         /// </summary>
         RemoteGoAway,
 
         /// <summary>
-        /// This session is no longer accepting new channels
+        /// This session has sent a GoAway and is no longer accepting new channels.
         /// </summary>
         LocalGoAway,
 
         /// <summary>
-        /// the maximum number of open channels has been reached
+        /// The maximum number of concurrent channels has been reached.
         /// </summary>
         StreamsExhausted,
 
         /// <summary>
-        /// the sender exceeded the receiver's window
+        /// The sender exceeded the receiver's advertised window.
         /// </summary>
         RecvWindowExceeded,
 
         /// <summary>
-        /// underlying stream/connection encountered an error
+        /// The underlying transport encountered an error.
         /// </summary>
         StreamError,
 
         /// <summary>
-        /// underlying stream/connection was closed
+        /// The underlying transport was closed.
         /// </summary>
         StreamClosed,
     }
 
+    /// <summary>
+    /// Represents an error that occurred at the session level.
+    /// </summary>
     [Serializable]
     public class SessionException : YamuxException
     {
         /// <summary>
-        /// Session Error code
+        /// Gets the session error code.
         /// </summary>
         public SessionErrorCode ErrorCode { get; set; }
 
         /// <summary>
-        /// If the session error was caused by a Go Away code
+        /// Gets the GoAway termination code, if the error was caused by a GoAway frame.
         /// </summary>
         public SessionTermination? GoAwayCode { get; set; }
 
+        /// <summary>
+        /// Initializes a new instance of the <see cref="SessionException"/> class with the specified error code.
+        /// </summary>
+        /// <param name="err">The session error code.</param>
+        /// <param name="termination">An optional GoAway termination code.</param>
         public SessionException(SessionErrorCode err, SessionTermination? termination = null) 
         {
             GoAwayCode = termination;
             ErrorCode = err;
         }
 
+        /// <summary>
+        /// Initializes a new instance of the <see cref="SessionException"/> class with a specified error code and message.
+        /// </summary>
+        /// <param name="err">The session error code.</param>
+        /// <param name="message">The error message.</param>
+        /// <param name="termination">An optional GoAway termination code.</param>
         public SessionException(SessionErrorCode err, string message, SessionTermination? termination = null) : base(message)
         {
             ErrorCode = err;
             GoAwayCode = termination;
         }
 
+        /// <summary>
+        /// Initializes a new instance of the <see cref="SessionException"/> class with a specified error code, message,
+        /// and inner exception.
+        /// </summary>
+        /// <param name="err">The session error code.</param>
+        /// <param name="message">The error message.</param>
+        /// <param name="inner">The inner exception.</param>
+        /// <param name="termination">An optional GoAway termination code.</param>
         public SessionException(SessionErrorCode err, string message, Exception inner, SessionTermination? termination = null) : base(message, inner)
         {
             ErrorCode = err;

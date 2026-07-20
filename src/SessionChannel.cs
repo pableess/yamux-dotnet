@@ -40,15 +40,14 @@ internal class SessionChannel : IDuplexSessionChannel
 
     private Lock _receiveWindowLock = new Lock();
     private Lock _stateLock = new Lock();
-    private ManualResetEventSlim _remoteCloseEvent;
     private TaskCompletionSource _remoteCloseTask;
-    private ManualResetEventSlim _remoteAckEvent;
     private TaskCompletionSource _remoteAckTask;
-    private Timer? _closeTimer;
+    private CancellationTokenSource? _closeTimeoutCts;
     private uint _receiveWindowMax;
 
     private volatile bool _disposed;
     private YamuxException? _fault;
+    private ValueTask? _pendingPipeFlush;
 
     private ChannelLocalPhase _localPhase;
     private ChannelRemoteState _remoteState;
@@ -104,9 +103,7 @@ internal class SessionChannel : IDuplexSessionChannel
 
         _inputBuffer = new Pipe(new PipeOptions(pauseWriterThreshold: _channelOptions.ReceiveWindowUpperBound + 1));
 
-        _remoteCloseEvent = new ManualResetEventSlim(false);
         _remoteCloseTask = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        _remoteAckEvent = new ManualResetEventSlim(false);
         _remoteAckTask = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
         _remoteWindow = new RemoteDataWindow();
@@ -266,21 +263,8 @@ internal class SessionChannel : IDuplexSessionChannel
         return task == _remoteAckTask.Task;
     }
 
-    public bool WaitForRemoteClose(TimeSpan timeout)
-    {
-        this.ThrowIfDisposed();
-        return this._remoteCloseEvent.Wait(timeout);
-    }
-
-    public bool WaitForRemoteAck(TimeSpan timeout)
-    {
-        this.ThrowIfDisposed();
-        return this._remoteAckEvent.Wait(timeout);
-    }
-
     public void Dispose()
     {
-        Timer? timerToDispose = null;
         lock (this._stateLock)
         {
             if (!this._disposed)
@@ -289,19 +273,13 @@ internal class SessionChannel : IDuplexSessionChannel
 
                 _writeClosedCancellation.Cancel();
 
-                if (_closeTimer != null)
-                {
-                    _closeTimer.Change(Timeout.Infinite, Timeout.Infinite);
-                    timerToDispose = _closeTimer;
-                    _closeTimer = null;
-                }
+                CancelCloseTimeout();
 
                 if (_remoteState < ChannelRemoteState.ReadClosed)
                 {
                     _localPhase = ChannelLocalPhase.WriteClosed;
                     _remoteState = ChannelRemoteState.Reset;
                     _inputBuffer.Writer.Complete();
-                    _remoteCloseEvent.Set();
                     _remoteCloseTask.TrySetResult();
                 }
 
@@ -314,7 +292,6 @@ internal class SessionChannel : IDuplexSessionChannel
                 Stats = null;
             }
         }
-        timerToDispose?.Dispose();
     }
 
     public ValueTask DisposeAsync()
@@ -343,6 +320,16 @@ internal class SessionChannel : IDuplexSessionChannel
         }
     }
 
+    private void CancelCloseTimeout()
+    {
+        if (_closeTimeoutCts != null)
+        {
+            _closeTimeoutCts.Cancel();
+            _closeTimeoutCts.Dispose();
+            _closeTimeoutCts = null;
+        }
+    }
+
     internal void RemoteAckReceived()
     {
         lock (_stateLock)
@@ -350,7 +337,6 @@ internal class SessionChannel : IDuplexSessionChannel
             if (_remoteState == ChannelRemoteState.None)
             {
                 _remoteState = ChannelRemoteState.Open;
-                _remoteAckEvent.Set();
                 _remoteAckTask.TrySetResult();
             }
         }
@@ -407,13 +393,23 @@ internal class SessionChannel : IDuplexSessionChannel
             {
                 if (_remoteState < ChannelRemoteState.ReadClosed)
                 {
-                    _closeTimer = new Timer(_ =>
-                    {
-                        ForceCloseTimeout();
-                    }, null, closeTimeout, Timeout.InfiniteTimeSpan);
+                    _closeTimeoutCts = new CancellationTokenSource();
+                    var cts = _closeTimeoutCts;
+                    _ = CloseTimeoutAsync(closeTimeout, cts);
                 }
             }
         }
+    }
+
+    private async Task CloseTimeoutAsync(TimeSpan timeout, CancellationTokenSource cts)
+    {
+        try
+        {
+            await Task.Delay(timeout, cts.Token).ConfigureAwait(false);
+            ForceCloseTimeout();
+        }
+        catch (OperationCanceledException) { }
+        finally { cts.Dispose(); }
     }
 
     private void ForceCloseTimeout()
@@ -428,7 +424,6 @@ internal class SessionChannel : IDuplexSessionChannel
 
             _writeClosedCancellation.Cancel();
             _inputBuffer.Writer.Complete(_fault ?? new SessionChannelException(ChannelErrorCode.ChannelClosed, "Stream close timeout exceeded"));
-            _remoteCloseEvent.Set();
             _remoteCloseTask.TrySetResult();
         }
 
@@ -487,7 +482,6 @@ internal class SessionChannel : IDuplexSessionChannel
 
     private void ProcessIncomingFlags(Flags flags)
     {
-        Timer? timerToDispose = null;
         lock (_stateLock)
         {
             if (_disposed)
@@ -506,7 +500,6 @@ internal class SessionChannel : IDuplexSessionChannel
                 {
                     _remoteState = ChannelRemoteState.Open;
                     _session.ChannelAcknowledge(this, true);
-                    _remoteAckEvent.Set();
                     _remoteAckTask.TrySetResult();
                 }
             }
@@ -515,62 +508,73 @@ internal class SessionChannel : IDuplexSessionChannel
             {
                 if (_remoteState < ChannelRemoteState.ReadClosed)
                 {
-                    if (_closeTimer != null)
-                    {
-                        _closeTimer.Change(Timeout.Infinite, Timeout.Infinite);
-                        timerToDispose = _closeTimer;
-                        _closeTimer = null;
-                    }
+                    CancelCloseTimeout();
                     _remoteState = ChannelRemoteState.ReadClosed;
                     _inputBuffer.Writer.Complete(_fault);
-                    _remoteCloseEvent.Set();
                     _remoteCloseTask.TrySetResult();
                 }
             }
 
             if (flags.HasFlag((Flags)Flags.RST))
             {
-                if (_closeTimer != null)
-                {
-                    _closeTimer.Change(Timeout.Infinite, Timeout.Infinite);
-                    timerToDispose ??= _closeTimer;
-                    _closeTimer = null;
-                }
+                CancelCloseTimeout();
                 _fault = new SessionChannelException(ChannelErrorCode.ChannelRejected, "Channel was rejected or forcibly closed by the remote peer");
                 _remoteState = ChannelRemoteState.Reset;
                 _localPhase = ChannelLocalPhase.WriteClosed;
                 _writeClosedCancellation.Cancel();
                 _inputBuffer.Writer.Complete(_fault);
-                _remoteCloseEvent.Set();
                 _remoteCloseTask.TrySetResult();
                 _session.ChannelDisconnect(this);
             }
         }
-        timerToDispose?.Dispose();
     }
 
     internal PipeWriter GetPipeWriter() => _inputBuffer.Writer;
 
+    internal async ValueTask WaitForPendingFlushAsync()
+    {
+        if (_pendingPipeFlush.HasValue)
+        {
+            await _pendingPipeFlush.Value.ConfigureAwait(false);
+            _pendingPipeFlush = null;
+        }
+    }
+
+    internal void OffloadPipeFlush(ValueTask<FlushResult> flushTask, PipeWriter writer)
+    {
+        _pendingPipeFlush = HandleOffloadedPipeFlushAsync(flushTask, writer);
+    }
+
+    private async ValueTask HandleOffloadedPipeFlushAsync(ValueTask<FlushResult> flushTask, PipeWriter pipeWriter)
+    {
+        try
+        {
+            var result = await flushTask.ConfigureAwait(false);
+            if (result.IsCompleted)
+            {
+                CloseWrite();
+                await pipeWriter.CompleteAsync().ConfigureAwait(false);
+            }
+        }
+        catch (Exception ex)
+        {
+            if (ChannelTracer.Switch.ShouldTrace(TraceEventType.Error))
+                ChannelTracer.TraceEvent(TraceEventType.Error, 0, $"[Err] yamux: offloaded pipe flush failed for channel {Id}: {ex.Message}");
+        }
+    }
+
     private void CompleteRead(YamuxException? fault = null)
     {
-        Timer? timerToDispose = null;
         lock (_stateLock)
         {
             if (_remoteState < ChannelRemoteState.ReadClosed)
             {
-                if (_closeTimer != null)
-                {
-                    _closeTimer.Change(Timeout.Infinite, Timeout.Infinite);
-                    timerToDispose = _closeTimer;
-                    _closeTimer = null;
-                }
+                CancelCloseTimeout();
                 _remoteState = ChannelRemoteState.ReadClosed;
                 _inputBuffer.Writer.Complete(fault);
-                _remoteCloseEvent.Set();
                 _remoteCloseTask.TrySetResult();
             }
         }
-        timerToDispose?.Dispose();
     }
 
     private void OnInputBytesConsumed()
@@ -591,6 +595,18 @@ internal class SessionChannel : IDuplexSessionChannel
                 if (ChannelTracer.Switch.ShouldTrace(TraceEventType.Verbose))
                     ChannelTracer.TraceEvent(TraceEventType.Verbose, 0, $"[Dbg] yamux: Channel {Id} auto-tune window increase max window size to {_receiveWindowMax} ");
                 increase = _receiveWindowMax - previousMax;
+            }
+            else if (_channelOptions.AutoTuneReceiveWindowSize
+                && rtt.HasValue
+                && _timeSinceLastUpdate > rtt.Value.Ticks * 4)
+            {
+                var halved = Math.Max(_receiveWindowMax / 2, _channelOptions.ReceiveWindowSize);
+                if (halved < _receiveWindowMax)
+                {
+                    _receiveWindowMax = halved;
+                    if (ChannelTracer.Switch.ShouldTrace(TraceEventType.Verbose))
+                        ChannelTracer.TraceEvent(TraceEventType.Verbose, 0, $"[Dbg] yamux: Channel {Id} auto-tune window decreased max window size to {_receiveWindowMax} ");
+                }
             }
 
             if (_input.ConsumedBytes > (_receiveWindowMax / 2))

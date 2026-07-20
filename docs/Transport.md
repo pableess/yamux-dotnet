@@ -1,3 +1,8 @@
+---
+title: Transport
+nav_order: 15
+---
+
 # Custom Transport
 
 Yamux can run over any reliable, ordered, duplex transport by implementing the `ITransport` interface.

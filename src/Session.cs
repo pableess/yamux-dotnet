@@ -53,7 +53,7 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
         }
 
         _channelManager = new ChannelManager(this, _sessionOptions.DefaultChannelOptions, _sessionOptions.AcceptBacklog, null, _sessionOptions.MaxChannels);
-        _writer = new SessionFrameWriter(_transport, Stats, _sessionOptions.ConnectionWriteTimeout);
+        _writer = new SessionFrameWriter(_transport, Stats, _sessionOptions.ConnectionWriteTimeout, _sessionOptions.WriteQueueDepth);
         _frameReader = new FrameReader(
             new ConnectionReader(_transport),
             _channelManager,
@@ -70,7 +70,7 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
                 sessionId: isClient ? "client" : "server",
                 isClient: isClient,
                 getActiveChannels: () => _channelManager.ActiveChannelCount,
-                getWriteQueueDepth: () => 0);
+                getWriteQueueDepth: () => _writer.WriteQueueDepth);
 
             _channelManager.SetMetrics(Metrics);
             _frameReader.SetMetrics(Metrics);
@@ -78,10 +78,25 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Gets the current round-trip time to the remote peer, measured by keep-alive pings.
+    /// <c>null</c> if no ping has completed yet.
+    /// </summary>
     public TimeSpan? RTT { get; private set; }
 
+    /// <summary>
+    /// Gets the bandwidth and byte statistics for this session, if enabled via <see cref="SessionOptions.EnableStatistics"/>.
+    /// </summary>
     public Statistics? Stats { get; private set; }
 
+    /// <summary>
+    /// Opens a new channel with the specified options.
+    /// </summary>
+    /// <param name="options">The channel options to apply.</param>
+    /// <param name="waitForAcknowledgement">If <c>true</c>, the returned task completes only after the remote peer acknowledges the new channel.</param>
+    /// <param name="cancellationToken">A cancellation token to cancel the open operation.</param>
+    /// <returns>A <see cref="ValueTask"/> representing the asynchronous operation, with the opened channel.</returns>
+    /// <exception cref="SessionException">Thrown when the session is in GoAway state or channels have been exhausted.</exception>
     public ValueTask<IDuplexSessionChannel> OpenChannelAsync(SessionChannelOptions options, bool waitForAcknowledgement = false, CancellationToken cancellationToken = default)
     {
         if (!_channelManager.CanAcceptNew)
@@ -137,13 +152,35 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
         return ValueTask.FromResult((IDuplexSessionChannel)channel);
     }
 
+    /// <summary>
+    /// Opens a new channel with the default session options.
+    /// </summary>
+    /// <param name="waitForAcknowledgement">If <c>true</c>, the returned task completes only after the remote peer acknowledges the new channel.</param>
+    /// <param name="cancellationToken">A cancellation token to cancel the open operation.</param>
+    /// <returns>A <see cref="ValueTask"/> representing the asynchronous operation, with the opened channel.</returns>
     public ValueTask<IDuplexSessionChannel> OpenChannelAsync(bool waitForAcknowledgement = false, CancellationToken cancellationToken = default) =>
         this.OpenChannelAsync(_sessionOptions.DefaultChannelOptions, waitForAcknowledgement, cancellationToken);
 
+    /// <summary>
+    /// Accepts an incoming channel from the remote peer.
+    /// </summary>
+    /// <param name="cancellationToken">A cancellation token to cancel the accept operation.</param>
+    /// <returns>A <see cref="ValueTask"/> representing the asynchronous operation, with the accepted channel.</returns>
     public ValueTask<IDuplexSessionChannel> AcceptAsync(CancellationToken cancellationToken = default) => AcceptChannelAsync(_sessionOptions.DefaultChannelOptions, cancellationToken);
 
+    /// <summary>
+    /// Accepts an incoming channel with custom channel options.
+    /// </summary>
+    /// <param name="channelOptions">The channel options to apply to the accepted channel.</param>
+    /// <param name="cancellationToken">A cancellation token to cancel the accept operation.</param>
+    /// <returns>A <see cref="ValueTask"/> representing the asynchronous operation, with the accepted channel.</returns>
     public ValueTask<IDuplexSessionChannel> AcceptAsync(SessionChannelOptions channelOptions, CancellationToken cancellationToken) => AcceptChannelAsync(channelOptions, cancellationToken);
 
+    /// <summary>
+    /// Accepts an incoming channel as a read-only channel.
+    /// </summary>
+    /// <param name="cancellationToken">A cancellation token to cancel the accept operation.</param>
+    /// <returns>A <see cref="ValueTask"/> representing the asynchronous operation, with the accepted read-only channel.</returns>
     public async ValueTask<IReadOnlySessionChannel> AcceptReadOnlyChannelAsync(CancellationToken cancellationToken = default)
     {
         var channel = await AcceptChannelAsync(_sessionOptions.DefaultChannelOptions, cancellationToken);
@@ -172,11 +209,21 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Sends a ping to the remote peer and measures the round-trip time.
+    /// </summary>
+    /// <param name="cancellationToken">A cancellation token to cancel the ping operation.</param>
+    /// <returns>A <see cref="ValueTask"/> representing the asynchronous operation, with the measured round-trip time.</returns>
     public async ValueTask<TimeSpan> PingAsync(CancellationToken cancellationToken)
     {
         return await _pingManager.PingAsync(_writer, cancellationToken);
     }
 
+    /// <summary>
+    /// Starts the session, beginning frame reading, writing, and optional keep-alive pings.
+    /// Must be called before opening or accepting channels.
+    /// </summary>
+    /// <exception cref="SessionException">Thrown if the session has already been closed.</exception>
     public void Start()
     {
         _sessionOptions.DefaultChannelOptions?.Validate();
@@ -198,15 +245,34 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
         _started = true;
     }
 
+    /// <summary>
+    /// Gets whether the session has been closed.
+    /// </summary>
     public bool IsClosed { get; private set; }
 
+    /// <summary>
+    /// Gracefully closes the session, draining all open channels before disposing the transport.
+    /// </summary>
+    /// <returns>A <see cref="Task"/> representing the asynchronous close operation.</returns>
     public Task CloseAsync() => this.CloseAsync(null);
 
+    /// <summary>
+    /// Sends a GoAway notification and waits for all open channels to close gracefully within the specified timeout.
+    /// </summary>
+    /// <param name="timeout">The maximum time to wait for channels to close.</param>
+    /// <returns><c>true</c> if all channels closed within the timeout; otherwise <c>false</c>.</returns>
     public async Task<bool> CloseOpenChannelsAsync(TimeSpan timeout)
     {
         return await _channelManager.CloseOpenChannelsAsync(timeout);
     }
 
+    /// <summary>
+    /// Sends a GoAway frame to the remote peer, indicating this session will no longer accept new channels.
+    /// Existing channels continue to operate until closed.
+    /// </summary>
+    /// <param name="sessionTermination">The reason for the GoAway.</param>
+    /// <param name="cancellationToken">A cancellation token to cancel the operation.</param>
+    /// <returns>A <see cref="Task"/> representing the asynchronous operation.</returns>
     public async Task GoAwayAsync(SessionTermination sessionTermination = SessionTermination.Normal, CancellationToken cancellationToken = default)
     {
         try
@@ -274,6 +340,10 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Disposes the session asynchronously, closing it and releasing all resources.
+    /// </summary>
+    /// <returns>A <see cref="ValueTask"/> representing the asynchronous dispose operation.</returns>
     public async ValueTask DisposeAsync()
     {
         if (!_disposed)

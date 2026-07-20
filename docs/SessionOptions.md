@@ -1,3 +1,8 @@
+---
+title: SessionOptions
+nav_order: 12
+---
+
 # SessionOptions
 
 The `SessionOptions` class configures a Yamux session.

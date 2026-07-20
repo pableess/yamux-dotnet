@@ -43,6 +43,9 @@ public class Statistics : IDisposable
     /// </summary>
     public TimeSpan SampleInterval { get; }
 
+    /// <summary>
+    /// Occurs each time bandwidth statistics are sampled, at the interval specified by <see cref="SampleInterval"/>.
+    /// </summary>
     public event EventHandler? Sampled;
 
     /// <summary>
@@ -102,6 +105,9 @@ public class Statistics : IDisposable
         }
     }
 
+    /// <summary>
+    /// Releases all resources used by the <see cref="Statistics"/> instance, including the sampling timer.
+    /// </summary>
     public void Dispose()
     {
         if (!_disposed)
