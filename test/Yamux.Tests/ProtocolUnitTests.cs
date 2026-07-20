@@ -127,12 +127,13 @@ public class ProtocolUnitTests
 internal class MockChannelAdapter : IChannelSessionAdapter
 {
     public TimeSpan? RTT => TimeSpan.FromMilliseconds(10);
-    public Task SessionFault => Task.Delay(-1); // never faults
+    public Task SessionFault => Task.Delay(-1);
     public TimeSpan StreamSendTimeout => TimeSpan.FromSeconds(75);
     public TimeSpan StreamCloseTimeout => TimeSpan.FromMinutes(5);
 
-    public ValueTask SendFrameAsync(Frame frame, CancellationToken cancel) => ValueTask.CompletedTask;
+    public ValueTask SendFrameAsync(Frame frame, CancellationToken cancellationToken) => ValueTask.CompletedTask;
     public void EnqueueFrame(Frame frame) { }
+    public ValueTask FlushWritesAsync(CancellationToken cancellationToken) => ValueTask.CompletedTask;
     public void ChannelDisconnect(SessionChannel channel) { }
     public void ChannelAcknowledge(SessionChannel channel, bool accept) { }
 }

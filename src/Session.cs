@@ -12,7 +12,7 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
     private SemaphoreSlim _closeLock = new SemaphoreSlim(1, 1);
 
     private readonly ITransport _transport;
-    private readonly ConnectionWriter _writer;
+    private readonly SessionFrameWriter _writer;
     private readonly PingManager _pingManager;
     private readonly ChannelManager _channelManager;
     private readonly FrameReader _frameReader;
@@ -20,7 +20,7 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
     private readonly TaskCompletionSource _sessionFault = new(TaskCreationOptions.RunContinuationsAsynchronously);
     internal readonly YamuxMetrics? Metrics;
 
-    private readonly bool _keepTransportOpenOnClose;
+    private readonly bool _leaveOpen;
 
     private Task? _keepAlive;
     private bool _started;
@@ -28,12 +28,21 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
     private readonly CancellationTokenSource _keepAliveToken;
     private readonly SessionOptions _sessionOptions;
     private volatile bool _disposed;
+    private int _isClosing;
 
-    internal Session(ITransport connection, bool isClient, bool keepTransportOpenOnClose = false, SessionOptions? options = null)
+    /// <summary>
+    /// Initializes a new instance of the <see cref="Session"/> class.
+    /// </summary>
+    /// <param name="transport">The underlying transport for this session.</param>
+    /// <param name="isClient">Whether this is the client side of the connection. Client uses odd stream IDs, server uses even.</param>
+    /// <param name="leaveOpen">Whether to leave the transport open when the session is closed. When true, the caller is responsible for disposing the transport.</param>
+    /// <param name="options">Session configuration options. If null, default options are used.</param>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="transport"/> is null.</exception>
+    public Session(ITransport transport, bool isClient, bool leaveOpen = false, SessionOptions? options = null)
     {
         _sessionOptions = options ?? new SessionOptions();
-        _transport = connection ?? throw new ArgumentNullException(nameof(connection));
-        _keepTransportOpenOnClose = keepTransportOpenOnClose;
+        _transport = transport ?? throw new ArgumentNullException(nameof(transport));
+        _leaveOpen = leaveOpen;
         _idGenerator = new StreamIdGenerator(!isClient);
         _pingManager = new PingManager();
         _keepAliveToken = new CancellationTokenSource();
@@ -44,7 +53,7 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
         }
 
         _channelManager = new ChannelManager(this, _sessionOptions.DefaultChannelOptions, _sessionOptions.AcceptBacklog, null, _sessionOptions.MaxChannels);
-        _writer = new ConnectionWriter(_transport, Stats);
+        _writer = new SessionFrameWriter(_transport, Stats, _sessionOptions.ConnectionWriteTimeout);
         _frameReader = new FrameReader(
             new ConnectionReader(_transport),
             _channelManager,
@@ -52,7 +61,7 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
             _writer,
             Stats,
             null,
-            ex => CloseAsync((ex as SessionException) ?? new SessionException(SessionErrorCode.StreamError, "Underlying stream encountered an error", ex, SessionTermination.InternalError)),
+            ex => CloseAsync((ex as SessionException) ?? new SessionException(SessionErrorCode.StreamClosed, "Underlying stream encountered an error", ex, SessionTermination.InternalError)),
             _sessionOptions);
 
         if (_sessionOptions.EnableMetrics)
@@ -73,7 +82,7 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
 
     public Statistics? Stats { get; private set; }
 
-    public ValueTask<IDuplexSessionChannel> OpenChannelAsync(SessionChannelOptions options, bool waitForAcknowledgement = false, CancellationToken? cancel = null)
+    public ValueTask<IDuplexSessionChannel> OpenChannelAsync(SessionChannelOptions options, bool waitForAcknowledgement = false, CancellationToken cancellationToken = default)
     {
         if (!_channelManager.CanAcceptNew)
         {
@@ -93,16 +102,32 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
         {
             TaskCompletionSource<IDuplexSessionChannel> tcs = new TaskCompletionSource<IDuplexSessionChannel>();
 
-            if (cancel != null)
+            if (cancellationToken != default)
             {
-                var registration = cancel.Value.Register(() =>
+                var registration = cancellationToken.Register(() =>
                 {
-                    tcs.TrySetCanceled();
+                    tcs.TrySetCanceled(cancellationToken);
                 });
                 tcs.Task.ContinueWith(t =>
                 {
                     registration.Dispose();
                 });
+            }
+
+            if (_sessionOptions.StreamOpenTimeout > TimeSpan.Zero)
+            {
+                var timeoutCts = new CancellationTokenSource(_sessionOptions.StreamOpenTimeout);
+                timeoutCts.Token.Register(() =>
+                {
+                    if (!tcs.Task.IsCompleted)
+                    {
+                        tcs.TrySetException(new TimeoutException("Stream open timeout exceeded"));
+                    }
+                });
+                tcs.Task.ContinueWith(_ =>
+                {
+                    try { timeoutCts.Dispose(); } catch { }
+                }, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
             }
 
             _channelManager.TrackConnect(id, tcs);
@@ -112,24 +137,24 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
         return ValueTask.FromResult((IDuplexSessionChannel)channel);
     }
 
-    public ValueTask<IDuplexSessionChannel> OpenChannelAsync(bool waitForAcknowledgement = false, CancellationToken? cancel = null) =>
-        this.OpenChannelAsync(_sessionOptions.DefaultChannelOptions, waitForAcknowledgement, cancel);
+    public ValueTask<IDuplexSessionChannel> OpenChannelAsync(bool waitForAcknowledgement = false, CancellationToken cancellationToken = default) =>
+        this.OpenChannelAsync(_sessionOptions.DefaultChannelOptions, waitForAcknowledgement, cancellationToken);
 
-    public ValueTask<IDuplexSessionChannel> AcceptAsync(CancellationToken? cancel = null) => AcceptChannelAsync(_sessionOptions.DefaultChannelOptions, cancel);
+    public ValueTask<IDuplexSessionChannel> AcceptAsync(CancellationToken cancellationToken = default) => AcceptChannelAsync(_sessionOptions.DefaultChannelOptions, cancellationToken);
 
-    public ValueTask<IDuplexSessionChannel> AcceptAsync(SessionChannelOptions channelOptions, CancellationToken? cancel) => AcceptChannelAsync(channelOptions, cancel);
+    public ValueTask<IDuplexSessionChannel> AcceptAsync(SessionChannelOptions channelOptions, CancellationToken cancellationToken) => AcceptChannelAsync(channelOptions, cancellationToken);
 
-    public async ValueTask<IReadOnlySessionChannel> AcceptReadOnlyChannelAsync(CancellationToken? cancel)
+    public async ValueTask<IReadOnlySessionChannel> AcceptReadOnlyChannelAsync(CancellationToken cancellationToken = default)
     {
-        var channel = await AcceptChannelAsync(_sessionOptions.DefaultChannelOptions, cancel);
+        var channel = await AcceptChannelAsync(_sessionOptions.DefaultChannelOptions, cancellationToken);
         return channel;
     }
 
-    private async ValueTask<IDuplexSessionChannel> AcceptChannelAsync(SessionChannelOptions channelOptions, CancellationToken? cancel = null)
+    private async ValueTask<IDuplexSessionChannel> AcceptChannelAsync(SessionChannelOptions channelOptions, CancellationToken cancellationToken = default)
     {
         try
         {
-            var channel = await _channelManager.WaitForAcceptAsync(cancel ?? CancellationToken.None);
+            var channel = await _channelManager.WaitForAcceptAsync(cancellationToken);
 
             if (this.IsClosed)
             {
@@ -138,7 +163,7 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
 
             channel.Accept();
 
-            await channel.ApplyOptionsAsync(channelOptions, cancel ?? CancellationToken.None);
+            await channel.ApplyOptionsAsync(channelOptions, cancellationToken);
             return channel;
         }
         catch (ChannelClosedException)
@@ -147,9 +172,9 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
         }
     }
 
-    public async ValueTask<TimeSpan> PingAsync(CancellationToken cancellation)
+    public async ValueTask<TimeSpan> PingAsync(CancellationToken cancellationToken)
     {
-        return await _pingManager.PingAsync(_writer, cancellation);
+        return await _pingManager.PingAsync(_writer, cancellationToken);
     }
 
     public void Start()
@@ -182,11 +207,11 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
         return await _channelManager.CloseOpenChannelsAsync(timeout);
     }
 
-    public async Task GoAwayAsync(SessionTermination sessionTermination = SessionTermination.Normal, CancellationToken? cancel = null)
+    public async Task GoAwayAsync(SessionTermination sessionTermination = SessionTermination.Normal, CancellationToken cancellationToken = default)
     {
         try
         {
-            await _writer.WriteAsync(Frame.CreateGoAwayFrame(sessionTermination), cancel ?? CancellationToken.None);
+            await _writer.WriteAsync(Frame.CreateGoAwayFrame(sessionTermination), cancellationToken);
             _channelManager.SetLocalGoAway();
         }
         catch (Exception ex)
@@ -197,7 +222,10 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
 
     private async Task CloseAsync(SessionException? err = null)
     {
-        await _closeLock.WaitAsync();
+        if (Interlocked.CompareExchange(ref _isClosing, 1, 0) != 0)
+            return;
+
+        await _closeLock.WaitAsync().ConfigureAwait(false);
 
         try
         {
@@ -206,26 +234,30 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
                 if (_keepAlive != null)
                 {
                     _keepAliveToken.Cancel();
-                    await _keepAlive;
+                    await _keepAlive.ConfigureAwait(false);
                     _keepAliveToken.Dispose();
                     _keepAlive = null;
                 }
 
-                await GoAwayAsync(err?.GoAwayCode ?? SessionTermination.Normal);
-
                 _channelManager.FailAllConnects(
                     new SessionChannelException(ChannelErrorCode.SessionClosed, "The session has been closed"));
 
-                _channelManager.CloseAllChannels(err);
+                _frameReader.PrepareForClose();
 
-                _frameReader.Stop();
-
-                await _frameReader.WaitForCompletionAsync(TimeSpan.FromSeconds(2));
-
-                if (!_keepTransportOpenOnClose)
+                if (!_leaveOpen)
                 {
                     _transport.Close();
+                }
 
+                _frameReader.Stop();
+                await _frameReader.WaitForCompletionAsync().ConfigureAwait(false);
+
+                _channelManager.CloseAllChannels(err);
+
+                await _writer.StopAsync().ConfigureAwait(false);
+
+                if (!_leaveOpen)
+                {
                     if (_transport is IDisposable d)
                     {
                         d.Dispose();
@@ -264,14 +296,14 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
             {
                 try
                 {
-                    this.RTT = await PingAsync(_keepAliveToken.Token);
+                    this.RTT = await PingAsync(_keepAliveToken.Token).ConfigureAwait(false);
                     Metrics?.RecordRtt(this.RTT.Value);
                 }
                 catch (Exception e) when (e is not OperationCanceledException)
                 {
                 }
 
-                await Task.Delay(_sessionOptions.KeepAliveInterval, _keepAliveToken.Token);
+                await Task.Delay(_sessionOptions.KeepAliveInterval, _keepAliveToken.Token).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException)
@@ -281,14 +313,19 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
 
     #region channel adapter
 
-    ValueTask IChannelSessionAdapter.SendFrameAsync(Frame frame, CancellationToken cancel)
+    ValueTask IChannelSessionAdapter.SendFrameAsync(Frame frame, CancellationToken cancellationToken)
     {
-        return _writer.WriteAsync(frame, cancel);
+        return _writer.WriteAsync(frame, cancellationToken);
     }
 
     void IChannelSessionAdapter.EnqueueFrame(Frame frame)
     {
         _writer.EnqueueFrame(frame);
+    }
+
+    ValueTask IChannelSessionAdapter.FlushWritesAsync(CancellationToken cancellationToken)
+    {
+        return _writer.FlushAsync(cancellationToken);
     }
 
     Task IChannelSessionAdapter.SessionFault => _sessionFault.Task;

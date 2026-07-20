@@ -1,7 +1,7 @@
 <Project>
   <PropertyGroup>
-    <TargetFramework>net9.0</TargetFramework>
-    <VersionPrefix>0.0.5</VersionPrefix>
+    <TargetFrameworks>net9.0;net10.0</TargetFrameworks>
+    <VersionPrefix>0.0.6</VersionPrefix>
     <VersionSuffix>rc1</VersionSuffix>
     <Authors>Paul Bleess</Authors>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>

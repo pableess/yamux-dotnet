@@ -120,7 +120,7 @@ internal class Program
                         channelTasks.Add(task);
                     }
                 }
-                catch (SessionException e) when (e.ErrorCode == SessionErrorCode.SessionShutdown)
+                catch (SessionException e) when (e.ErrorCode is SessionErrorCode.SessionShutdown or SessionErrorCode.StreamClosed or SessionErrorCode.StreamError)
                 {
                     AnsiConsole.MarkupLine("[yellow]Client disconnected[/]");
                 }

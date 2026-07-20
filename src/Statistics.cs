@@ -49,11 +49,12 @@ public class Statistics : IDisposable
     /// Initializes a new instance of the <see cref="Statistics"/> class and starts the timer.
     /// </summary>
     /// <param name="intervalMilliseconds">The interval in milliseconds for sampling the bandwidth.</param>
-    public Statistics(int intervalMilliseconds, CancellationToken cancel)
+    /// <param name="cancellationToken">A cancellation token to stop the statistics timer.</param>
+    public Statistics(int intervalMilliseconds, CancellationToken cancellationToken)
     {
         SampleInterval = TimeSpan.FromMilliseconds(intervalMilliseconds);
         _timer = new Timer(SampleBandwidth, null, intervalMilliseconds, intervalMilliseconds);
-        _cancel = cancel;
+        _cancel = cancellationToken;
     }
 
     /// <summary>

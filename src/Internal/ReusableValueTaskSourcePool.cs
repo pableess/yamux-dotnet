@@ -1,64 +1,31 @@
-﻿using System;
-using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-using System.Threading.Tasks.Sources;
+﻿using System.Collections.Concurrent;
 
-namespace Yamux.Internal
+namespace Yamux.Internal;
+
+internal sealed class ReusableValueTaskSourcePool
 {
+    private readonly ConcurrentQueue<TaskCompletionSource> _queue = new();
+    private const int MaxPoolSize = 1024;
+    private int _count;
 
-    internal class ReusableValueTaskSource : IValueTaskSource
+    public TaskCompletionSource Rent()
     {
-        private ManualResetValueTaskSourceCore<bool> _core;
-
-        public ReusableValueTaskSource()
+        if (_queue.TryDequeue(out var item))
         {
-            _core = new ManualResetValueTaskSourceCore<bool>
-            {
-                RunContinuationsAsynchronously = true
-            };
+            Interlocked.Decrement(ref _count);
+            return item;
         }
 
-        public void Reset()
-        {
-            _core.Reset();
-        }
-
-        public void SetResult() => _core.SetResult(true);
-        public void SetException(Exception error) => _core.SetException(error);
-        public ValueTaskSourceStatus GetStatus(short token) => _core.GetStatus(token);
-        public void OnCompleted(Action<object?> continuation, object? state, short token, ValueTaskSourceOnCompletedFlags flags)
-            => _core.OnCompleted(continuation, state, token, flags);
-
-        public void GetResult(short token) => _core.GetResult(token);
-
-        public short Version => _core.Version;
+        return new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 
-    internal sealed class ReusableValueTaskSourcePool
+    public void Return(TaskCompletionSource item)
     {
-        private readonly ConcurrentQueue<ReusableValueTaskSource> _queue = new();
-        private const int MaxPoolSize = 1024;
-        private int _count;
-
-        public ReusableValueTaskSource Rent()
-        {
-            if (_queue.TryDequeue(out var item))
-            {
-                Interlocked.Decrement(ref _count);
-                item.Reset();
-                return item;
-            }
-
-            return new ReusableValueTaskSource();
-        }
-
-        public void Return(ReusableValueTaskSource item)
+        if (item.Task.IsCompleted)
         {
             if (Interlocked.Increment(ref _count) <= MaxPoolSize)
             {
+                item.TrySetResult();
                 _queue.Enqueue(item);
             }
             else

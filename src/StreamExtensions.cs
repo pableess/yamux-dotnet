@@ -7,14 +7,20 @@ using Yamux.Protocol;
 
 namespace Yamux
 {
+    /// <summary>
+    /// Extension methods for creating Yamux sessions from <see cref="Stream"/> instances.
+    /// </summary>
     public static class StreamExtensions
     {
         /// <summary>
-        /// Creates a yamux session from the raw stream
+        /// Creates a Yamux session over the provided stream.
         /// </summary>
-        /// <param name="stream"></param>
-        /// <returns></returns>
-        public static Session AsYamuxSession(this Stream stream, bool isClient, bool keepOpen = false, SessionOptions? options = null)
-            => new Session(new StreamPeer(stream), isClient, keepOpen, options);
+        /// <param name="stream">The stream to use as the transport.</param>
+        /// <param name="isClient">Whether this is the client side of the connection.</param>
+        /// <param name="leaveOpen">Whether to leave the stream open when the session is disposed.</param>
+        /// <param name="options">Session configuration options. If null, default options are used.</param>
+        /// <returns>A new <see cref="Session"/> instance.</returns>
+        public static Session AsYamuxSession(this Stream stream, bool isClient, bool leaveOpen = false, SessionOptions? options = null)
+            => new Session(new StreamPeer(stream), isClient, leaveOpen, options);
     }
 }

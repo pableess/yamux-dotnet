@@ -14,7 +14,7 @@ namespace Yamux.Internal
             _peer = peer ?? throw new ArgumentNullException(nameof(peer));
         }
 
-        public async IAsyncEnumerable<FrameHeader> ReadFramesAsync([EnumeratorCancellation] CancellationToken cancel)
+        public async IAsyncEnumerable<FrameHeader> ReadFramesAsync([EnumeratorCancellation] CancellationToken cancellationToken)
         {
             byte[] headerBuffer = new byte[FrameHeader.FrameHeaderSize];
 
@@ -24,17 +24,16 @@ namespace Yamux.Internal
             {
                 try
                 {
-                    bytesRead = await this.ReadAll(headerBuffer, cancel);
+                    bytesRead = await this.ReadAll(headerBuffer, cancellationToken).ConfigureAwait(false);
 
                     if (bytesRead == 0)
                     {
-                        // remote closed the connection
                         throw new SessionException(SessionErrorCode.StreamClosed, "Connection closed by remote", SessionTermination.Normal);
                     }
                 }
                 catch (OperationCanceledException)
                 {
-                    // TODO: add debug tracing
+                    yield break;
                 }
 
                 if (!_stoppingToken.IsCancellationRequested)
@@ -44,30 +43,48 @@ namespace Yamux.Internal
             }
         }
 
-        public async ValueTask<int> ReadFramePayloadAsync(Memory<byte> data, CancellationToken cancel)
+        public async ValueTask<int> ReadFramePayloadAsync(Memory<byte> data, CancellationToken cancellationToken)
         {
-            return await this.ReadAll(data, cancel);
+            return await this.ReadAll(data, cancellationToken).ConfigureAwait(false);
         }
 
-        private async ValueTask<int> ReadAll(Memory<byte> data, CancellationToken cancel)
+        private async ValueTask<int> ReadAll(Memory<byte> data, CancellationToken cancellationToken)
         {
             if (data.IsEmpty)
                 return 0;
 
             int requested = data.Length;
             int bytesRead = 0;
-            do
+            try
             {
-                var read = await _peer.ReadAsync(data.Slice(bytesRead, requested - bytesRead), cancel);
-                if (read == 0)
+                do
                 {
-                    throw new SessionException(SessionErrorCode.StreamClosed, "Remote connection closed");
+                    var read = await _peer.ReadAsync(data.Slice(bytesRead, requested - bytesRead), cancellationToken).ConfigureAwait(false);
+                    if (read == 0)
+                    {
+                        throw new SessionException(SessionErrorCode.StreamClosed, "Remote connection closed");
+                    }
+                    bytesRead += read;
                 }
-                bytesRead += read;
-            }
-            while (bytesRead < requested);
+                while (bytesRead < requested);
 
-            return bytesRead;
+                return bytesRead;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (SessionException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                throw new SessionException(
+                    SessionErrorCode.StreamClosed,
+                    "Underlying transport error",
+                    ex);
+            }
         }
 
         public void Stop()

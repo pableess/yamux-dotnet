@@ -1,18 +1,18 @@
 # Yamux (dotnet)
 
-> This library is not yet production ready.  Api may change prior to 1.0 release.  Please use with caution and provide feedback.
->
-
 Yamux (dotnet) is a .NET 9 library implementing the [Yamux multiplexing protocol](https://github.com/hashicorp/yamux/blob/master/spec.md), enabling multiple reliable, ordered, and independent streams (channels) over a single underlying connection (such as TCP). This is useful for building high-performance network applications, tunneling, or protocols that require multiplexed communication.
 
 ## Features
 - Full-duplex, multiplexed streams over a single connection
-- Channel-based abstraction (`SessionChannel`, `IDuplexSessionChannel`)
-- Configurable flow control and window sizing
-- Automatic window tuning for optimal throughput
+- Channel-based abstraction (`IDuplexSessionChannel`, `IReadOnlySessionChannel`, `IWriteOnlySessionChannel`)
+- Configurable flow control with automatic window tuning
 - Keep-alive and round-trip time (RTT) measurement
 - Bandwidth and statistics tracking
-	- Low allocations and high-performance design (uses System.IO.Pipelines to reduce buffer copies)
+- OpenTelemetry-compatible metrics via `System.Diagnostics.Metrics`
+- Low allocations and high-performance design (uses `System.IO.Pipelines` to reduce buffer copies)
+- AOT-compatible
+- Graceful session shutdown with channel drain
+- Pluggable transport layer (`Stream`, `Socket`, `IDuplexPipe`)
 - .NET 9, async/await friendly
 
 ## Getting Started

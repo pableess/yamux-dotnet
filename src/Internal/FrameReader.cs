@@ -9,7 +9,7 @@ internal class FrameReader
     private readonly ConnectionReader _reader;
     private readonly ChannelManager _channelManager;
     private readonly PingManager _pingManager;
-    private readonly ConnectionWriter _writer;
+    private readonly SessionFrameWriter _writer;
     private readonly Statistics? _stats;
     private YamuxMetrics? _metrics;
     private readonly Func<Exception, Task> _onFault;
@@ -17,12 +17,13 @@ internal class FrameReader
     private readonly SessionOptions _sessionOptions;
 
     private Task? _readLoop;
+    private volatile bool _isStopping;
 
     public FrameReader(
         ConnectionReader reader,
         ChannelManager channelManager,
         PingManager pingManager,
-        ConnectionWriter writer,
+        SessionFrameWriter writer,
         Statistics? stats,
         YamuxMetrics? metrics,
         Func<Exception, Task> onFault,
@@ -47,7 +48,14 @@ internal class FrameReader
 
     public void Stop()
     {
+        _isStopping = true;
         _reader.Stop();
+        _readToken.Cancel();
+    }
+
+    public void PrepareForClose()
+    {
+        _isStopping = true;
     }
 
     public CancellationToken CancellationToken => _readToken.Token;
@@ -56,10 +64,18 @@ internal class FrameReader
     {
         if (_readLoop != null)
         {
-            if (_readLoop != await Task.WhenAny(_readLoop, Task.Delay(timeout, _readToken.Token)))
+            if (_readLoop != await Task.WhenAny(_readLoop, Task.Delay(timeout)))
             {
                 _readToken.Cancel();
             }
+        }
+    }
+
+    public async Task WaitForCompletionAsync()
+    {
+        if (_readLoop != null)
+        {
+            await _readLoop.ConfigureAwait(false);
         }
     }
 
@@ -80,7 +96,7 @@ internal class FrameReader
                         await HandleWindowUpdateFrame(frameHeader, _readToken.Token);
                         break;
                     case FrameType.Ping:
-                        _pingManager.HandlePing(frameHeader, _writer, _readToken.Token);
+                        await _pingManager.HandlePingAsync(frameHeader, _writer, _readToken.Token).ConfigureAwait(false);
                         break;
                     case FrameType.GoAway:
                         _channelManager.SetRemoteGoAway((SessionTermination)frameHeader.Length);
@@ -92,9 +108,12 @@ internal class FrameReader
         }
         catch (Exception ex)
         {
-            Session.SessionTracer.TraceInformation("[Err]: Session receive loop faulted");
-            _metrics?.SessionErrors.Add(1);
-            await _onFault(ex);
+            if (!_isStopping)
+            {
+                Session.SessionTracer.TraceInformation("[Err]: Session receive loop faulted");
+                _metrics?.SessionErrors.Add(1);
+                _ = Task.Run(() => _onFault(ex));
+            }
         }
     }
 
@@ -115,9 +134,21 @@ internal class FrameReader
 
     private async Task HandleDataFrame(FrameHeader frameHeader, CancellationToken token)
     {
-        var channel = await _channelManager.GetOrCreateAsync(frameHeader.StreamId, frameHeader.Flags, _writer, token);
+        var channel = await _channelManager.GetOrCreateAsync(frameHeader.StreamId, frameHeader.Flags, _writer, token).ConfigureAwait(false);
 
-        if (channel != null && frameHeader.Length > channel.ReceiveWindowUpperBound)
+        if (channel == null)
+        {
+            Session.SessionTracer.TraceInformation("[WARN] yamux: discarding data frame for unknown stream {0}, sending RST", frameHeader.StreamId);
+
+            _ = _writer.WriteAsync(
+                Frame.CreateWindowUpdateFrame(frameHeader.StreamId, Flags.RST, 0),
+                CancellationToken.None);
+
+            await ReadPayloadData(frameHeader.Length, null, token).ConfigureAwait(false);
+            return;
+        }
+
+        if (frameHeader.Length > channel.ReceiveWindowUpperBound)
         {
             Session.SessionTracer.TraceEvent(TraceEventType.Error, 0, $"[Err] yamux: receive window exceeded (stream: {channel.Id}, length: {frameHeader.Length}, max: {channel.ReceiveWindowUpperBound})");
 
@@ -129,7 +160,19 @@ internal class FrameReader
                 SessionTermination.ProtocolError);
         }
 
-        await ReadPayloadData(frameHeader.Length, channel, token);
+        if (frameHeader.Length > _sessionOptions.MaxIncomingFrameSize)
+        {
+            Session.SessionTracer.TraceEvent(TraceEventType.Error, 0, $"[Err] yamux: incoming frame size exceeded (stream: {channel.Id}, length: {frameHeader.Length}, max: {_sessionOptions.MaxIncomingFrameSize})");
+
+            _ = _writer.WriteAsync(
+                Frame.CreateGoAwayFrame(SessionTermination.ProtocolError),
+                CancellationToken.None);
+            throw new SessionException(SessionErrorCode.RecvWindowExceeded,
+                $"incoming frame size exceeded (stream: {channel.Id})",
+                SessionTermination.ProtocolError);
+        }
+
+        await ReadPayloadData(frameHeader.Length, channel, token).ConfigureAwait(false);
     }
 
     private async ValueTask ReadPayloadData(uint payloadLength, SessionChannel? channel, CancellationToken cancellationToken)
@@ -153,7 +196,7 @@ internal class FrameReader
                         buffer = buffer.Slice(0, bytesToRead);
                     }
 
-                    var read = await _reader.ReadFramePayloadAsync(buffer, cancellationToken);
+                    var read = await _reader.ReadFramePayloadAsync(buffer, cancellationToken).ConfigureAwait(false);
 
                     if (read == 0)
                     {
@@ -164,7 +207,7 @@ internal class FrameReader
 
                     bytesToRead -= read;
 
-                    var flushResult = await pipeWriter.FlushAsync(cancellationToken);
+                    var flushResult = await pipeWriter.FlushAsync(cancellationToken).ConfigureAwait(false);
 
                     if (flushResult.IsCompleted)
                     {
