@@ -89,4 +89,28 @@ public class SessionOptions
     /// Enables OpenTelemetry-compatible metrics via <see cref="System.Diagnostics.Metrics"/>.
     /// </summary>
     public bool EnableMetrics { get; set; } = true;
+
+    /// <summary>
+    /// Overrides the transport's default of mode of the writer accumulates multiple frames into a single Write call
+    /// The transport must support the <see cref="ITransport.WriteAsync(System.Buffers.ReadOnlySequence{byte}, System.Threading.CancellationToken)"/> overload for this to be effective.
+    /// This would only be useful if the transport is capable of scatter/gather writes (e.g., <c>SocketAsyncEventArgs.BufferList</c>).
+    /// <see cref="System.Buffers.ReadOnlySequence{T}"/> and writes them to the transport
+    /// in one call via <see cref="ITransport.WriteAsync(System.Buffers.ReadOnlySequence{byte}, System.Threading.CancellationToken)"/>.
+    /// To realize throughput gains, the transport must implement that overload
+    /// efficiently (e.g., scatter/gather via <c>SocketAsyncEventArgs.BufferList</c>).
+    /// When disabled, each frame component (header, payload) is written individually
+    /// via <see cref="ITransport.WriteAsync(System.ReadOnlyMemory{byte}, System.Threading.CancellationToken)"/>.
+    /// Only frames already queued in the write channel at the same time are batched together.
+    /// Default is <c>false</c>.
+    /// </summary>
+    public bool? WriteSegmentBatchingEnabled { get; set; }
+
+    /// <summary>
+    /// The minimum accumulated data (in bytes) that triggers a batched transport write.
+    /// Accumulated data below this threshold is flushed when the write queue is drained
+    /// or when <see cref="SessionChannel.FlushWritesAsync"/> is called.
+    /// Only relevant when <see cref="WriteSegmentBatchingEnabled"/> is <c>true</c>.
+    /// Default is 8,192 (8 KB).
+    /// </summary>
+    public int MinWriteBatchSize { get; set; } = 8192;
 }

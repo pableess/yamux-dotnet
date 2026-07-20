@@ -53,7 +53,8 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
         }
 
         _channelManager = new ChannelManager(this, _sessionOptions.DefaultChannelOptions, _sessionOptions.AcceptBacklog, null, _sessionOptions.MaxChannels);
-        _writer = new SessionFrameWriter(_transport, Stats, _sessionOptions.ConnectionWriteTimeout, _sessionOptions.WriteQueueDepth);
+        bool useBatching = _sessionOptions.WriteSegmentBatchingEnabled ?? _transport.SupportsBatching;
+        _writer = new SessionFrameWriter(_transport, Stats, _sessionOptions.ConnectionWriteTimeout, _sessionOptions.WriteQueueDepth, useBatching, _sessionOptions.MinWriteBatchSize);
         _frameReader = new FrameReader(
             new ConnectionReader(_transport),
             _channelManager,

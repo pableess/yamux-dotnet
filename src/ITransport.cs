@@ -1,7 +1,7 @@
 ﻿using System.Buffers;
 
-namespace Yamux
-{
+namespace Yamux;
+
 /// <summary>
 /// Represents a bidirectional transport layer that can be used by a Yamux session.
 /// Implementations wrap stream-oriented transports such as TCP sockets, named pipes,
@@ -43,6 +43,11 @@ public interface ITransport : IDisposable
     ValueTask FlushAsync(CancellationToken cancellationToken = default) => ValueTask.CompletedTask;
 
     /// <summary>
+    /// Override and return true to opt into batching writes via <see cref="WriteAsync(ReadOnlySequence{byte}, CancellationToken)"/>.
+    /// </summary>
+    bool SupportsBatching => false;
+
+    /// <summary>
     /// Writes a sequence of byte segments to the transport. The default implementation
     /// iterates over the segments and calls <see cref="WriteAsync(ReadOnlyMemory{byte}, CancellationToken)"/> for each.
     /// </summary>
@@ -59,5 +64,4 @@ public interface ITransport : IDisposable
                 await transport.WriteAsync(segment, ct).ConfigureAwait(false);
         }
     }
-}
 }
