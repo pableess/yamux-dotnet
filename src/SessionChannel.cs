@@ -640,11 +640,6 @@ internal class SessionChannel : IDuplexSessionChannel
     {
         this.ThrowIfDisposed();
 
-        if (_fault != null)
-        {
-            throw _fault;
-        }
-
         if (!CanWrite)
         {
             lock (_stateLock)
@@ -655,6 +650,11 @@ internal class SessionChannel : IDuplexSessionChannel
                 }
                 throw new SessionChannelException(ChannelErrorCode.ChannelClosed, "SessionChannel is closed");
             }
+        }
+
+        if (_fault != null)
+        {
+            throw _fault;
         }
     }
 
