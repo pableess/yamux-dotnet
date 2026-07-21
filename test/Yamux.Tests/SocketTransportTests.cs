@@ -26,17 +26,17 @@ public class SocketTransportTests
 
         var serverTask = Task.Run(async () =>
         {
-            using var clientSocket = await listener.AcceptAsync();
+            using var clientSocket = await listener.AcceptAsync(TestContext.Current.CancellationToken);
             await using var session = clientSocket.AsYamuxSession(false);
             session.Start();
 
-            using var channel = await session.AcceptAsync();
+            using var channel = await session.AcceptAsync(TestContext.Current.CancellationToken);
 
             long index = 0;
             ReadResult res;
             do
             {
-                res = await channel.Input.ReadAsync();
+                res = await channel.Input.ReadAsync(TestContext.Current.CancellationToken);
                 if (res.Buffer.Length > 0)
                 {
                     res.Buffer.CopyTo(result.Slice((int)index, (int)res.Buffer.Length).Span);
@@ -48,21 +48,21 @@ public class SocketTransportTests
             channel.Close();
             await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
             channel.Dispose();
-        });
+        }, TestContext.Current.CancellationToken);
 
         var clientTask = Task.Run(async () =>
         {
             using var sock = new Socket(SocketType.Stream, ProtocolType.Tcp);
-            await sock.ConnectAsync(new IPEndPoint(IPAddress.Loopback, port));
+            await sock.ConnectAsync(new IPEndPoint(IPAddress.Loopback, port), TestContext.Current.CancellationToken);
 
             await using var session = sock.AsYamuxSession(true);
             session.Start();
 
-            using var channel = await session.OpenChannelAsync();
-            await channel.WriteAsync(buffer);
+            using var channel = await session.OpenChannelAsync(cancellationToken: TestContext.Current.CancellationToken);
+            await channel.WriteAsync(buffer, TestContext.Current.CancellationToken);
             channel.Close();
             await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
-        });
+        }, TestContext.Current.CancellationToken);
 
         await Task.WhenAll(serverTask, clientTask);
         result.ToArray().Should().BeEquivalentTo(buffer.ToArray());
@@ -83,7 +83,7 @@ public class SocketTransportTests
 
         var serverTask = Task.Run(async () =>
         {
-            using var clientSocket = await listener.AcceptAsync();
+            using var clientSocket = await listener.AcceptAsync(TestContext.Current.CancellationToken);
             await using var session = clientSocket.AsYamuxSession(false);
             session.Start();
 
@@ -92,23 +92,23 @@ public class SocketTransportTests
             {
                 tasks.Add(Task.Run(async () =>
                 {
-                    using var channel = await session.AcceptAsync();
+                    using var channel = await session.AcceptAsync(TestContext.Current.CancellationToken);
                     var ms = new MemoryStream();
                     await channel.Input.CopyToAsync(ms);
                     results[channel.Id] = ms.ToArray();
                     channel.Close();
                     await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(3));
                     channel.Dispose();
-                }));
+                }, TestContext.Current.CancellationToken));
             }
 
             await Task.WhenAll(tasks);
-        });
+        }, TestContext.Current.CancellationToken);
 
         var clientTask = Task.Run(async () =>
         {
             using var sock = new Socket(SocketType.Stream, ProtocolType.Tcp);
-            await sock.ConnectAsync(new IPEndPoint(IPAddress.Loopback, port));
+            await sock.ConnectAsync(new IPEndPoint(IPAddress.Loopback, port), TestContext.Current.CancellationToken);
 
             await using var session = sock.AsYamuxSession(true);
             session.Start();
@@ -118,15 +118,15 @@ public class SocketTransportTests
             {
                 tasks.Add(Task.Run(async () =>
                 {
-                    using var channel = await session.OpenChannelAsync();
-                    await channel.WriteAsync(data);
+                    using var channel = await session.OpenChannelAsync(cancellationToken: TestContext.Current.CancellationToken);
+                    await channel.WriteAsync(data, TestContext.Current.CancellationToken);
                     channel.Close();
                     await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(3));
-                }));
+                }, TestContext.Current.CancellationToken));
             }
 
             await Task.WhenAll(tasks);
-        });
+        }, TestContext.Current.CancellationToken);
 
         await Task.WhenAll(serverTask, clientTask);
 
@@ -147,22 +147,22 @@ public class SocketTransportTests
 
         bool errorDetected = false;
 
-        var serverTask = Task.Run(async () =>
+var serverTask = Task.Run(async () =>
         {
             try
             {
-                using var clientSocket = await listener.AcceptAsync();
+                using var clientSocket = await listener.AcceptAsync(TestContext.Current.CancellationToken);
                 await using var session = clientSocket.AsYamuxSession(false);
                 session.Start();
 
-                using var channel = await session.AcceptAsync();
+                using var channel = await session.AcceptAsync(TestContext.Current.CancellationToken);
 
                 try
                 {
                     ReadResult res;
                     do
                     {
-                        res = await channel.Input.ReadAsync();
+res = await channel.Input.ReadAsync(TestContext.Current.CancellationToken);
                         if (res.IsCompleted)
                         {
                             break;
@@ -179,22 +179,22 @@ public class SocketTransportTests
             catch
             {
             }
-        });
+        }, TestContext.Current.CancellationToken);
 
         var clientTask = Task.Run(async () =>
         {
             using var sock = new Socket(SocketType.Stream, ProtocolType.Tcp);
-            await sock.ConnectAsync(new IPEndPoint(IPAddress.Loopback, port));
+            await sock.ConnectAsync(new IPEndPoint(IPAddress.Loopback, port), TestContext.Current.CancellationToken);
 
             var session = sock.AsYamuxSession(true);
             session.Start();
 
-            var channel = await session.OpenChannelAsync();
-            await channel.WriteAsync(new byte[1024]);
-            await Task.Delay(200);
+            var channel = await session.OpenChannelAsync(cancellationToken: TestContext.Current.CancellationToken);
+            await channel.WriteAsync(new byte[1024], TestContext.Current.CancellationToken);
+            await Task.Delay(200, TestContext.Current.CancellationToken);
 
             sock.Close();
-        });
+        }, TestContext.Current.CancellationToken);
 
         await Task.WhenAll(serverTask, clientTask);
         errorDetected.Should().BeTrue();
@@ -216,12 +216,12 @@ public class SocketTransportTests
 
         var serverTask = Task.Run(async () =>
         {
-            using var clientSocket = await listener.AcceptAsync();
+            using var clientSocket = await listener.AcceptAsync(TestContext.Current.CancellationToken);
             await using var session = clientSocket.AsYamuxSession(false);
             session.Start();
-            using var channel = await session.AcceptAsync();
+            using var channel = await session.AcceptAsync(TestContext.Current.CancellationToken);
 
-            await channel.WriteAsync(serverData);
+            await channel.WriteAsync(serverData, TestContext.Current.CancellationToken);
             channel.Close();
 
             var ms = new MemoryStream();
@@ -230,18 +230,18 @@ public class SocketTransportTests
 
             await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
             channel.Dispose();
-        });
+        }, TestContext.Current.CancellationToken);
 
         var clientTask = Task.Run(async () =>
         {
             using var sock = new Socket(SocketType.Stream, ProtocolType.Tcp);
-            await sock.ConnectAsync(new IPEndPoint(IPAddress.Loopback, port));
+            await sock.ConnectAsync(new IPEndPoint(IPAddress.Loopback, port), TestContext.Current.CancellationToken);
 
             await using var session = sock.AsYamuxSession(true);
             session.Start();
-            using var channel = await session.OpenChannelAsync();
+            using var channel = await session.OpenChannelAsync(cancellationToken: TestContext.Current.CancellationToken);
 
-            await channel.WriteAsync(clientData);
+            await channel.WriteAsync(clientData, TestContext.Current.CancellationToken);
             channel.Close();
 
             var ms = new MemoryStream();
@@ -250,7 +250,7 @@ public class SocketTransportTests
 
             await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
             channel.Dispose();
-        });
+        }, TestContext.Current.CancellationToken);
 
         await Task.WhenAll(serverTask, clientTask);
 

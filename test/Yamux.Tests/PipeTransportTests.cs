@@ -40,7 +40,7 @@ public class PipeTransportTests
             ReadResult res;
             do
             {
-                res = await channel.Input.ReadAsync();
+                res = await channel.Input.ReadAsync(TestContext.Current.CancellationToken);
                 if (res.Buffer.Length > 0)
                 {
                     res.Buffer.CopyTo(result.Slice((int)index, (int)res.Buffer.Length).Span);
@@ -52,7 +52,7 @@ public class PipeTransportTests
             channel.Close();
             await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
             channel.Dispose();
-        });
+        }, TestContext.Current.CancellationToken);
 
         var clientTask = Task.Run(async () =>
         {
@@ -71,14 +71,14 @@ public class PipeTransportTests
                 {
                     var end = current + chunkSize;
                     var slice = buffer.Slice(current, end >= buffer.Length ? buffer.Length - current : chunkSize);
-                    await channel.WriteAsync(slice, CancellationToken.None);
+                    await channel.WriteAsync(slice, TestContext.Current.CancellationToken);
                 }
                 current += chunkSize;
             }
 
             channel.Close();
             await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
-        });
+        }, TestContext.Current.CancellationToken);
 
         await Task.WhenAll(serverTask, clientTask);
         result.ToArray().Should().BeEquivalentTo(buffer.ToArray());

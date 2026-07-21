@@ -150,19 +150,19 @@ public class ProtocolEdgeCaseTests
         {
             await using var session = new Session(new StreamPeer(server), false);
             session.Start();
-            await Task.Delay(5000);
-        });
+            await Task.Delay(5000, TestContext.Current.CancellationToken);
+        }, TestContext.Current.CancellationToken);
 
         var clientTask = Task.Run(async () =>
         {
             await using var session = new Session(new StreamPeer(client), true);
             session.Start();
 
-            var rtt = await session.PingAsync(CancellationToken.None);
+            var rtt = await session.PingAsync(TestContext.Current.CancellationToken);
 
             rtt.TotalMilliseconds.Should().BeGreaterThan(0);
             rtt.TotalMilliseconds.Should().BeLessThan(5000);
-        });
+        }, TestContext.Current.CancellationToken);
 
         await Task.WhenAll(serverTask, clientTask);
     }
@@ -176,24 +176,24 @@ public class ProtocolEdgeCaseTests
         {
             await using var session = new Session(new StreamPeer(server), false);
             session.Start();
-            using var channel = await session.AcceptAsync();
+            using var channel = await session.AcceptAsync(TestContext.Current.CancellationToken);
 
             ReadResult res;
             do
             {
-                res = await channel.Input.ReadAsync();
+                res = await channel.Input.ReadAsync(TestContext.Current.CancellationToken);
                 channel.Input.AdvanceTo(res.Buffer.End, res.Buffer.End);
             } while (!res.IsCanceled && !res.IsCompleted);
-        });
+        }, TestContext.Current.CancellationToken);
 
         await using var clientSession = new Session(new StreamPeer(client), true);
         clientSession.Start();
-        using var channel = await clientSession.OpenChannelAsync();
+        using var channel = await clientSession.OpenChannelAsync(cancellationToken: TestContext.Current.CancellationToken);
 
-        await channel.WriteAsync(new byte[32]);
+        await channel.WriteAsync(new byte[32], TestContext.Current.CancellationToken);
         channel.Close();
 
-        Func<Task> writeAfterClose = async () => await channel.WriteAsync(new byte[1]);
+        Func<Task> writeAfterClose = async () => await channel.WriteAsync(new byte[1], TestContext.Current.CancellationToken);
         await writeAfterClose.Should().ThrowAsync<SessionChannelException>();
 
         await Task.WhenAll(serverTask);
@@ -209,19 +209,19 @@ public class ProtocolEdgeCaseTests
             await using var session = new Session(new StreamPeer(server), false, options: new SessionOptions { MaxChannels = 2 });
             session.Start();
 
-            using var c1 = await session.AcceptAsync();
-            using var c2 = await session.AcceptAsync();
+            using var c1 = await session.AcceptAsync(TestContext.Current.CancellationToken);
+            using var c2 = await session.AcceptAsync(TestContext.Current.CancellationToken);
 
-            await Task.Delay(2000);
-        });
+            await Task.Delay(2000, TestContext.Current.CancellationToken);
+        }, TestContext.Current.CancellationToken);
 
         await using var clientSession = new Session(new StreamPeer(client), true, options: new SessionOptions { MaxChannels = 2 });
         clientSession.Start();
 
-        using var ch1 = await clientSession.OpenChannelAsync();
-        using var ch2 = await clientSession.OpenChannelAsync();
+        using var ch1 = await clientSession.OpenChannelAsync(cancellationToken: TestContext.Current.CancellationToken);
+        using var ch2 = await clientSession.OpenChannelAsync(cancellationToken: TestContext.Current.CancellationToken);
 
-        await Task.Delay(500);
+        await Task.Delay(500, TestContext.Current.CancellationToken);
 
         ch1.Close();
         ch2.Close();

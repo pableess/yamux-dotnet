@@ -307,7 +307,7 @@ internal class SessionChannel : IDuplexSessionChannel
             if (_localPhase == ChannelLocalPhase.None && _remoteState >= ChannelRemoteState.Open)
             {
                 _localPhase = ChannelLocalPhase.SynSent;
-                this.SendWindowUpdate(0);
+                this.SendWindowUpdate(0, Flags.ACK);
             }
             else
             {
@@ -469,8 +469,6 @@ internal class SessionChannel : IDuplexSessionChannel
                     _localPhase = ChannelLocalPhase.SynSent;
                     break;
                 case ChannelLocalPhase.SynSent:
-                    flags |= Flags.ACK;
-                    _localPhase = ChannelLocalPhase.Established;
                     break;
                 case ChannelLocalPhase.WriteClosed:
                     flags |= Flags.FIN;
@@ -480,7 +478,7 @@ internal class SessionChannel : IDuplexSessionChannel
         }
     }
 
-    private void ProcessIncomingFlags(Flags flags)
+    internal void ProcessIncomingFlags(Flags flags)
     {
         lock (_stateLock)
         {
@@ -496,12 +494,14 @@ internal class SessionChannel : IDuplexSessionChannel
 
             if (flags.HasFlag(Flags.ACK))
             {
+                if (_localPhase == ChannelLocalPhase.SynSent)
+                    _localPhase = ChannelLocalPhase.Established;
                 if (_remoteState == ChannelRemoteState.None)
                 {
                     _remoteState = ChannelRemoteState.Open;
-                    _session.ChannelAcknowledge(this, true);
-                    _remoteAckTask.TrySetResult();
                 }
+                _session.ChannelAcknowledge(this, true);
+                _remoteAckTask.TrySetResult();
             }
 
             if (flags.HasFlag(Flags.FIN))

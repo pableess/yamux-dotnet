@@ -76,6 +76,60 @@ await using var session = new Session(transport, isClient: true);
 session.Start();
 ```
 
+## Opting into Batching
+
+Yamux supports a batching mode that coalesces multiple small frame writes into a single call to the transport, reducing system call overhead. This is especially beneficial for transports with high per-write overhead (e.g., TCP sockets, named pipes).
+
+### How to opt in
+
+Override `SupportsBatching` to return `true` to enable the batching write path. When batching is enabled, Yamux will call `WriteAsync(ReadOnlySequence<byte>, CancellationToken)` instead of the single-segment `WriteAsync`, passing a sequence of pending frame bytes.
+
+```csharp
+public bool SupportsBatching => true;
+```
+
+### Batched WriteAsync
+
+When batching is enabled, you must implement the `ReadOnlySequence<byte>` overload of `WriteAsync`. The default implementation simply iterates over segments and calls the single-segment `WriteAsync` for each, which defeats the purpose of batching.
+
+```csharp
+public async ValueTask WriteAsync(ReadOnlySequence<byte> data, CancellationToken cancellationToken = default)
+{
+    // Use a transport-specific coalescing strategy:
+    // - Socket: use SocketAsyncEventArgs.BufferList for scatter-write
+    // - Pipe: copy segments into a single PipeWriter span then flush once
+    // - Stream: copy into a pre-allocated buffer and write once
+}
+```
+
+### FlushAsync
+
+When batching is enabled, the session may call `FlushAsync` to ensure all buffered data has been written to the underlying transport. Provide a meaningful implementation if your transport maintains internal buffers:
+
+```csharp
+public async ValueTask FlushAsync(CancellationToken cancellationToken = default)
+{
+    await _writer.FlushAsync(cancellationToken).ConfigureAwait(false);
+}
+```
+
+### Session-level override
+
+You can also force batching on or off at the session level via `SessionOptions.WriteSegmentBatchingEnabled`, which overrides the transport's `SupportsBatching` value:
+
+```csharp
+var options = new SessionOptions { WriteSegmentBatchingEnabled = true };
+await using var session = new Session(transport, isClient: true, options);
+```
+
+### Built-in examples
+
+| Transport | SupportsBatching | Strategy |
+|-----------|-----------------|----------|
+| `SocketPeer` | `true` | Uses `Socket.SendAsync` with `BufferList` (scatter-write) |
+| `PipePeer` | `true` | Copies segments into `PipeWriter.GetSpan`/`Advance`, single flush |
+| `StreamPeer` | `false` | Does not opt in; writes each segment individually |
+
 ## Important Notes
 
 - `ReadAsync` must return `0` when the remote end gracefully closes the connection. Yamux treats a `0` read as a connection close and will terminate the session.
