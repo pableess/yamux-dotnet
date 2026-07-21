@@ -4,9 +4,11 @@ namespace Yamux.Internal;
 
 internal interface IChannelSessionAdapter
 {
-    ValueTask SendFrameAsync(Frame frame, CancellationToken cancel);
+    ValueTask SendFrameAsync(Frame frame, CancellationToken cancellationToken);
 
     void EnqueueFrame(Frame frame);
+
+    ValueTask FlushWritesAsync(CancellationToken cancellationToken);
 
     void ChannelDisconnect(SessionChannel channel);
 

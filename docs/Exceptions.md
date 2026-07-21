@@ -1,3 +1,8 @@
+---
+title: Exceptions
+nav_order: 16
+---
+
 # Exceptions
 
 Yamux defines several exception types for error handling:

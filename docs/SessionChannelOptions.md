@@ -1,3 +1,8 @@
+---
+title: SessionChannelOptions
+nav_order: 13
+---
+
 # SessionChannelOptions
 
 The `SessionChannelOptions` class configures the behavior of a Yamux session channel.

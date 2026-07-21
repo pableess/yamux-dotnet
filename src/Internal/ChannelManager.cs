@@ -44,14 +44,14 @@ internal class ChannelManager
         return channel;
     }
 
-    public async ValueTask<SessionChannel?> GetOrCreateAsync(uint id, Flags flags, ConnectionWriter writer, CancellationToken cancel)
+    public async ValueTask<SessionChannel?> GetOrCreateAsync(uint id, Flags flags, SessionFrameWriter writer, CancellationToken cancellationToken)
     {
         if (_channels.TryGetValue(id, out var channel))
         {
             if (flags.HasFlag(Flags.SYN))
             {
                 Session.SessionTracer.TraceEvent(TraceEventType.Error, 0, $"[Err] yamux: duplicate stream declared: {id}");
-                await writer.WriteAsync(Frame.CreateWindowUpdateFrame(id, Flags.RST, 0), cancel);
+                await writer.WriteAsync(Frame.CreateWindowUpdateFrame(id, Flags.RST, 0), cancellationToken).ConfigureAwait(false);
                 return null;
             }
             return channel;
@@ -70,20 +70,20 @@ internal class ChannelManager
 
             if (reject)
             {
-                await writer.WriteAsync(Frame.CreateWindowUpdateFrame(id, Flags.RST, 0), cancel);
+                await writer.WriteAsync(Frame.CreateWindowUpdateFrame(id, Flags.RST, 0), cancellationToken).ConfigureAwait(false);
                 return null;
             }
 
             if (_channels.Count >= _maxChannels)
             {
-                await writer.WriteAsync(Frame.CreateWindowUpdateFrame(id, Flags.RST, 0), cancel);
+                await writer.WriteAsync(Frame.CreateWindowUpdateFrame(id, Flags.RST, 0), cancellationToken).ConfigureAwait(false);
                 return null;
             }
 
             var newChannel = new SessionChannel(_adapter, id, _defaultOptions, ChannelRemoteState.Open);
             _channels.TryAdd(id, newChannel);
 
-            await _acceptQueue.Writer.WriteAsync(newChannel, cancel);
+            await _acceptQueue.Writer.WriteAsync(newChannel, cancellationToken).ConfigureAwait(false);
 
             return newChannel;
         }
@@ -147,9 +147,9 @@ internal class ChannelManager
         _connects.Clear();
     }
 
-    public async ValueTask<SessionChannel> WaitForAcceptAsync(CancellationToken cancel)
+    public async ValueTask<SessionChannel> WaitForAcceptAsync(CancellationToken cancellationToken)
     {
-        var channel = await _acceptQueue.Reader.ReadAsync(cancel);
+        var channel = await _acceptQueue.Reader.ReadAsync(cancellationToken).ConfigureAwait(false);
         return channel;
     }
 
@@ -186,11 +186,19 @@ internal class ChannelManager
         var tasks = new Task<bool>[channels.Length];
         for (int i = 0; i < channels.Length; i++)
         {
-            channels[i].Close();
+            try
+            {
+                channels[i].Close();
+            }
+            catch (ObjectDisposedException)
+            {
+                tasks[i] = Task.FromResult(true);
+                continue;
+            }
             tasks[i] = channels[i].WhenRemoteCloseAsync(timeout);
         }
 
-        var results = await Task.WhenAll(tasks);
+        var results = await Task.WhenAll(tasks).ConfigureAwait(false);
         return results.All(r => r);
     }
 

@@ -96,9 +96,10 @@ internal class RemoteDataWindow(uint defaultSize = 256 * 1024) : IDisposable
     /// </summary>
     /// <param name="length"></param>
     /// <param name="timeout"></param>
+    /// <param name="cancellationToken">A cancellation token to cancel the wait operation.</param>
     /// <returns>The number of bytes that were acquired</returns>
     /// <exception cref="TimeoutException">Throws timeout exception if timeout occurs before any bytes are available from the window</exception>
-    public ValueTask<uint> WaitConsumeAsync(uint length, TimeSpan? timeout = null, CancellationToken? cancel = null)
+    public ValueTask<uint> WaitConsumeAsync(uint length, TimeSpan? timeout = null, CancellationToken? cancellationToken = null)
     {
         ThrowIfDisposed();
 
@@ -111,7 +112,7 @@ internal class RemoteDataWindow(uint defaultSize = 256 * 1024) : IDisposable
             {
                 return ValueTask.FromResult(consumed);
             }
-            waiter = new AsyncWaiter(length, timeout, cancel);
+            waiter = new AsyncWaiter(length, timeout, cancellationToken);
             _waiters.Enqueue(waiter);
         }
 

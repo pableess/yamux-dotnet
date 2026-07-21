@@ -1,3 +1,8 @@
+---
+title: Channels
+nav_order: 11
+---
+
 # Channel Interfaces
 
 Yamux defines several interfaces for working with channels:

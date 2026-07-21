@@ -43,17 +43,21 @@ public class Statistics : IDisposable
     /// </summary>
     public TimeSpan SampleInterval { get; }
 
+    /// <summary>
+    /// Occurs each time bandwidth statistics are sampled, at the interval specified by <see cref="SampleInterval"/>.
+    /// </summary>
     public event EventHandler? Sampled;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="Statistics"/> class and starts the timer.
     /// </summary>
     /// <param name="intervalMilliseconds">The interval in milliseconds for sampling the bandwidth.</param>
-    public Statistics(int intervalMilliseconds, CancellationToken cancel)
+    /// <param name="cancellationToken">A cancellation token to stop the statistics timer.</param>
+    public Statistics(int intervalMilliseconds, CancellationToken cancellationToken)
     {
         SampleInterval = TimeSpan.FromMilliseconds(intervalMilliseconds);
         _timer = new Timer(SampleBandwidth, null, intervalMilliseconds, intervalMilliseconds);
-        _cancel = cancel;
+        _cancel = cancellationToken;
     }
 
     /// <summary>
@@ -101,6 +105,9 @@ public class Statistics : IDisposable
         }
     }
 
+    /// <summary>
+    /// Releases all resources used by the <see cref="Statistics"/> instance, including the sampling timer.
+    /// </summary>
     public void Dispose()
     {
         if (!_disposed)

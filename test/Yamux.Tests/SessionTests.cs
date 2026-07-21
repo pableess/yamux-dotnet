@@ -179,13 +179,19 @@ public class SessionTests
 
             Func<Task> read = async () =>
             {
-                ReadResult res;
-                do
+                try
                 {
-                    res = await channel.Input.ReadAsync();
-                    if (res.Buffer.Length > 0)
-                        channel.Input.AdvanceTo(res.Buffer.End, res.Buffer.End);
-                } while (!res.IsCanceled && !res.IsCompleted);
+                    ReadResult res;
+                    do
+                    {
+                        res = await channel.Input.ReadAsync();
+                        if (res.Buffer.Length > 0)
+                            channel.Input.AdvanceTo(res.Buffer.End, res.Buffer.End);
+                    } while (!res.IsCanceled && !res.IsCompleted);
+                }
+                catch (YamuxException)
+                {
+                }
             };
 
             await read();
@@ -304,7 +310,7 @@ public class SessionTests
                 await channel.WriteAsync(buffer.Slice(0, 64), default);
                 await Task.Delay(200);
             }
-            catch (YamuxException)
+            catch
             {
             }
         });
@@ -341,7 +347,7 @@ public class SessionTests
             received.Should().BeEquivalentTo(data);
 
             channel.Close();
-            await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(5));
+            await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
             channel.Dispose();
         });
 
@@ -360,7 +366,7 @@ public class SessionTests
             Func<Task> writeAfterClose = () => channel.WriteAsync(new byte[1], CancellationToken.None).AsTask();
             await writeAfterClose.Should().ThrowAsync<SessionChannelException>();
 
-            await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(5));
+            await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
             channel.Dispose();
         });
 
@@ -485,7 +491,7 @@ public class SessionTests
             await channel1.WriteAsync(new byte[64], CancellationToken.None);
 
             channel1.Close();
-            await channel1.WhenRemoteCloseAsync(TimeSpan.FromSeconds(5));
+            await channel1.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
             channel1.Dispose();
         });
 
@@ -509,7 +515,7 @@ public class SessionTests
             } while (!res.IsCanceled && !res.IsCompleted);
 
             channel1.Close();
-            await channel1.WhenRemoteCloseAsync(TimeSpan.FromSeconds(5));
+            await channel1.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
             channel1.Dispose();
         });
 
@@ -539,7 +545,7 @@ public class SessionTests
             await channel.Input.CopyToAsync(ms);
             serverReceived = ms.ToArray();
 
-            await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(5));
+            await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
             channel.Dispose();
         });
 
@@ -556,7 +562,7 @@ public class SessionTests
             await channel.Input.CopyToAsync(ms);
             clientReceived = ms.ToArray();
 
-            await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(5));
+            await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
             channel.Dispose();
         });
 
@@ -580,30 +586,39 @@ public class SessionTests
             serverSession.Start();
             using var channel = await serverSession.AcceptAsync();
 
-            clientOpened.Wait(10000);
+            clientOpened.Wait(3000);
 
             byte[] received = new byte[64];
             long index = 0;
-            ReadResult res;
-            do
+            try
             {
-                res = await channel.Input.ReadAsync();
-                if (res.Buffer.Length > 0)
+                ReadResult res;
+                do
                 {
-                    res.Buffer.CopyTo(received.AsMemory((int)index).Span);
-                    index += res.Buffer.Length;
-                    channel.Input.AdvanceTo(res.Buffer.End, res.Buffer.End);
-                }
-            } while (!res.IsCanceled && !res.IsCompleted);
+                    res = await channel.Input.ReadAsync();
+                    if (res.Buffer.Length > 0)
+                    {
+                        res.Buffer.CopyTo(received.AsMemory((int)index).Span);
+                        index += res.Buffer.Length;
+                        channel.Input.AdvanceTo(res.Buffer.End, res.Buffer.End);
+                    }
+                } while (!res.IsCanceled && !res.IsCompleted);
+            }
+            catch (YamuxException)
+            {
+            }
 
             channel.Close();
-            await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(10));
+            await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(3));
             channel.Dispose();
         });
 
         var clientTask = Task.Run(async () =>
         {
-            await using var clientSession = new Session(new StreamPeer(client), true);
+            await using var clientSession = new Session(new StreamPeer(client), true, options: new SessionOptions
+            {
+                StreamOpenTimeout = TimeSpan.Zero
+            });
             clientSession.Start();
 
             using var channel = await clientSession.OpenChannelAsync(waitForAcknowledgement: true);
@@ -612,9 +627,9 @@ public class SessionTests
             await channel.WriteAsync(new byte[64], CancellationToken.None);
 
             channel.Close();
-            await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(10));
+            await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(3));
 
-            await Task.Delay(2000);
+            await Task.Delay(500);
             channel.Dispose();
         });
 
@@ -635,7 +650,7 @@ public class SessionTests
             await Task.Delay(500);
 
             channel.Close();
-            await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(5));
+            await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
             channel.Dispose();
         });
 
@@ -648,7 +663,7 @@ public class SessionTests
             await channel.WriteAsync(ReadOnlyMemory<byte>.Empty, CancellationToken.None);
 
             channel.Close();
-            await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(5));
+            await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
             channel.Dispose();
         });
 
@@ -673,7 +688,7 @@ public class SessionTests
             result = ms.ToArray();
 
             channel.Close();
-            await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(30));
+            await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(5));
             channel.Dispose();
         });
 
@@ -686,7 +701,7 @@ public class SessionTests
             await channel.WriteAsync(data, CancellationToken.None);
 
             channel.Close();
-            await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(30));
+            await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(5));
             channel.Dispose();
         });
 

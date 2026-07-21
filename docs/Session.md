@@ -1,3 +1,8 @@
+---
+title: Session
+nav_order: 10
+---
+
 # Session
 
 The `Session` class represents a Yamux session, allowing multiple logical streams over a single connection.

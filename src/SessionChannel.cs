@@ -40,15 +40,14 @@ internal class SessionChannel : IDuplexSessionChannel
 
     private Lock _receiveWindowLock = new Lock();
     private Lock _stateLock = new Lock();
-    private ManualResetEventSlim _remoteCloseEvent;
     private TaskCompletionSource _remoteCloseTask;
-    private ManualResetEventSlim _remoteAckEvent;
     private TaskCompletionSource _remoteAckTask;
-    private Timer? _closeTimer;
+    private CancellationTokenSource? _closeTimeoutCts;
     private uint _receiveWindowMax;
 
     private volatile bool _disposed;
     private YamuxException? _fault;
+    private ValueTask? _pendingPipeFlush;
 
     private ChannelLocalPhase _localPhase;
     private ChannelRemoteState _remoteState;
@@ -104,9 +103,7 @@ internal class SessionChannel : IDuplexSessionChannel
 
         _inputBuffer = new Pipe(new PipeOptions(pauseWriterThreshold: _channelOptions.ReceiveWindowUpperBound + 1));
 
-        _remoteCloseEvent = new ManualResetEventSlim(false);
         _remoteCloseTask = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        _remoteAckEvent = new ManualResetEventSlim(false);
         _remoteAckTask = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
         _remoteWindow = new RemoteDataWindow();
@@ -154,13 +151,13 @@ internal class SessionChannel : IDuplexSessionChannel
     }
 
 
-    public async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken? cancel = null)
+    public async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
     {
-        cancel?.ThrowIfCancellationRequested();
+        cancellationToken.ThrowIfCancellationRequested();
 
         var writeClosedToken = _writeClosedCancellation.Token;
 
-        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancel ?? CancellationToken.None, writeClosedToken);
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, writeClosedToken);
         var linkedToken = linkedCts.Token;
 
         this.ValidateStateForWrite();
@@ -221,13 +218,16 @@ internal class SessionChannel : IDuplexSessionChannel
         }
     }
 
-    public Task FlushWritesAsync(CancellationToken? cancel = null)
+    public ValueTask FlushWritesAsync(CancellationToken cancellationToken = default)
     {
-        return Task.CompletedTask;
+        return _session.FlushWritesAsync(cancellationToken);
     }
 
     public void Abort()
     {
+        if (_disposed)
+            return;
+
         _writeClosedCancellation.Cancel();
 
         lock (_stateLock)
@@ -263,18 +263,6 @@ internal class SessionChannel : IDuplexSessionChannel
         return task == _remoteAckTask.Task;
     }
 
-    public bool WaitForRemoteClose(TimeSpan timeout)
-    {
-        this.ThrowIfDisposed();
-        return this._remoteCloseEvent.Wait(timeout);
-    }
-
-    public bool WaitForRemoteAck(TimeSpan timeout)
-    {
-        this.ThrowIfDisposed();
-        return this._remoteAckEvent.Wait(timeout);
-    }
-
     public void Dispose()
     {
         lock (this._stateLock)
@@ -285,16 +273,17 @@ internal class SessionChannel : IDuplexSessionChannel
 
                 _writeClosedCancellation.Cancel();
 
-                _closeTimer?.Dispose();
-                _closeTimer = null;
+                CancelCloseTimeout();
 
                 if (_remoteState < ChannelRemoteState.ReadClosed)
                 {
+                    _localPhase = ChannelLocalPhase.WriteClosed;
                     _remoteState = ChannelRemoteState.Reset;
                     _inputBuffer.Writer.Complete();
-                    _remoteCloseEvent.Set();
                     _remoteCloseTask.TrySetResult();
                 }
+
+                this.SendWindowUpdate(0, (Flags)Flags.RST);
 
                 this._session.ChannelDisconnect(this);
 
@@ -303,6 +292,12 @@ internal class SessionChannel : IDuplexSessionChannel
                 Stats = null;
             }
         }
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        Dispose();
+        return ValueTask.CompletedTask;
     }
 
     internal void Accept()
@@ -325,6 +320,16 @@ internal class SessionChannel : IDuplexSessionChannel
         }
     }
 
+    private void CancelCloseTimeout()
+    {
+        if (_closeTimeoutCts != null)
+        {
+            _closeTimeoutCts.Cancel();
+            _closeTimeoutCts.Dispose();
+            _closeTimeoutCts = null;
+        }
+    }
+
     internal void RemoteAckReceived()
     {
         lock (_stateLock)
@@ -332,7 +337,6 @@ internal class SessionChannel : IDuplexSessionChannel
             if (_remoteState == ChannelRemoteState.None)
             {
                 _remoteState = ChannelRemoteState.Open;
-                _remoteAckEvent.Set();
                 _remoteAckTask.TrySetResult();
             }
         }
@@ -389,20 +393,30 @@ internal class SessionChannel : IDuplexSessionChannel
             {
                 if (_remoteState < ChannelRemoteState.ReadClosed)
                 {
-                    _closeTimer = new Timer(_ =>
-                    {
-                        ForceCloseTimeout();
-                    }, null, closeTimeout, Timeout.InfiniteTimeSpan);
+                    _closeTimeoutCts = new CancellationTokenSource();
+                    var cts = _closeTimeoutCts;
+                    _ = CloseTimeoutAsync(closeTimeout, cts);
                 }
             }
         }
+    }
+
+    private async Task CloseTimeoutAsync(TimeSpan timeout, CancellationTokenSource cts)
+    {
+        try
+        {
+            await Task.Delay(timeout, cts.Token).ConfigureAwait(false);
+            ForceCloseTimeout();
+        }
+        catch (OperationCanceledException) { }
+        finally { cts.Dispose(); }
     }
 
     private void ForceCloseTimeout()
     {
         lock (_stateLock)
         {
-            if (_remoteState >= ChannelRemoteState.ReadClosed)
+            if (_disposed || _remoteState >= ChannelRemoteState.ReadClosed)
                 return;
 
             _localPhase = ChannelLocalPhase.WriteClosed;
@@ -410,7 +424,6 @@ internal class SessionChannel : IDuplexSessionChannel
 
             _writeClosedCancellation.Cancel();
             _inputBuffer.Writer.Complete(_fault ?? new SessionChannelException(ChannelErrorCode.ChannelClosed, "Stream close timeout exceeded"));
-            _remoteCloseEvent.Set();
             _remoteCloseTask.TrySetResult();
         }
 
@@ -469,10 +482,10 @@ internal class SessionChannel : IDuplexSessionChannel
 
     private void ProcessIncomingFlags(Flags flags)
     {
-        this.ThrowIfDisposed();
-
         lock (_stateLock)
         {
+            if (_disposed)
+                return;
             if (flags.HasFlag(Flags.SYN))
             {
                 if (_remoteState == ChannelRemoteState.None)
@@ -487,7 +500,6 @@ internal class SessionChannel : IDuplexSessionChannel
                 {
                     _remoteState = ChannelRemoteState.Open;
                     _session.ChannelAcknowledge(this, true);
-                    _remoteAckEvent.Set();
                     _remoteAckTask.TrySetResult();
                 }
             }
@@ -496,31 +508,60 @@ internal class SessionChannel : IDuplexSessionChannel
             {
                 if (_remoteState < ChannelRemoteState.ReadClosed)
                 {
-                    _closeTimer?.Dispose();
-                    _closeTimer = null;
+                    CancelCloseTimeout();
                     _remoteState = ChannelRemoteState.ReadClosed;
                     _inputBuffer.Writer.Complete(_fault);
-                    _remoteCloseEvent.Set();
                     _remoteCloseTask.TrySetResult();
                 }
             }
 
             if (flags.HasFlag((Flags)Flags.RST))
             {
-                _closeTimer?.Dispose();
-                _closeTimer = null;
+                CancelCloseTimeout();
                 _fault = new SessionChannelException(ChannelErrorCode.ChannelRejected, "Channel was rejected or forcibly closed by the remote peer");
                 _remoteState = ChannelRemoteState.Reset;
                 _localPhase = ChannelLocalPhase.WriteClosed;
                 _writeClosedCancellation.Cancel();
                 _inputBuffer.Writer.Complete(_fault);
-                _remoteCloseEvent.Set();
                 _remoteCloseTask.TrySetResult();
+                _session.ChannelDisconnect(this);
             }
         }
     }
 
     internal PipeWriter GetPipeWriter() => _inputBuffer.Writer;
+
+    internal async ValueTask WaitForPendingFlushAsync()
+    {
+        if (_pendingPipeFlush.HasValue)
+        {
+            await _pendingPipeFlush.Value.ConfigureAwait(false);
+            _pendingPipeFlush = null;
+        }
+    }
+
+    internal void OffloadPipeFlush(ValueTask<FlushResult> flushTask, PipeWriter writer)
+    {
+        _pendingPipeFlush = HandleOffloadedPipeFlushAsync(flushTask, writer);
+    }
+
+    private async ValueTask HandleOffloadedPipeFlushAsync(ValueTask<FlushResult> flushTask, PipeWriter pipeWriter)
+    {
+        try
+        {
+            var result = await flushTask.ConfigureAwait(false);
+            if (result.IsCompleted)
+            {
+                CloseWrite();
+                await pipeWriter.CompleteAsync().ConfigureAwait(false);
+            }
+        }
+        catch (Exception ex)
+        {
+            if (ChannelTracer.Switch.ShouldTrace(TraceEventType.Error))
+                ChannelTracer.TraceEvent(TraceEventType.Error, 0, $"[Err] yamux: offloaded pipe flush failed for channel {Id}: {ex.Message}");
+        }
+    }
 
     private void CompleteRead(YamuxException? fault = null)
     {
@@ -528,11 +569,9 @@ internal class SessionChannel : IDuplexSessionChannel
         {
             if (_remoteState < ChannelRemoteState.ReadClosed)
             {
-                _closeTimer?.Dispose();
-                _closeTimer = null;
+                CancelCloseTimeout();
                 _remoteState = ChannelRemoteState.ReadClosed;
                 _inputBuffer.Writer.Complete(fault);
-                _remoteCloseEvent.Set();
                 _remoteCloseTask.TrySetResult();
             }
         }
@@ -556,6 +595,18 @@ internal class SessionChannel : IDuplexSessionChannel
                 if (ChannelTracer.Switch.ShouldTrace(TraceEventType.Verbose))
                     ChannelTracer.TraceEvent(TraceEventType.Verbose, 0, $"[Dbg] yamux: Channel {Id} auto-tune window increase max window size to {_receiveWindowMax} ");
                 increase = _receiveWindowMax - previousMax;
+            }
+            else if (_channelOptions.AutoTuneReceiveWindowSize
+                && rtt.HasValue
+                && _timeSinceLastUpdate > rtt.Value.Ticks * 4)
+            {
+                var halved = Math.Max(_receiveWindowMax / 2, _channelOptions.ReceiveWindowSize);
+                if (halved < _receiveWindowMax)
+                {
+                    _receiveWindowMax = halved;
+                    if (ChannelTracer.Switch.ShouldTrace(TraceEventType.Verbose))
+                        ChannelTracer.TraceEvent(TraceEventType.Verbose, 0, $"[Dbg] yamux: Channel {Id} auto-tune window decreased max window size to {_receiveWindowMax} ");
+                }
             }
 
             if (_input.ConsumedBytes > (_receiveWindowMax / 2))
@@ -589,11 +640,6 @@ internal class SessionChannel : IDuplexSessionChannel
     {
         this.ThrowIfDisposed();
 
-        if (_fault != null)
-        {
-            throw _fault;
-        }
-
         if (!CanWrite)
         {
             lock (_stateLock)
@@ -605,22 +651,27 @@ internal class SessionChannel : IDuplexSessionChannel
                 throw new SessionChannelException(ChannelErrorCode.ChannelClosed, "SessionChannel is closed");
             }
         }
+
+        if (_fault != null)
+        {
+            throw _fault;
+        }
     }
 
-    private static async Task<ulong> CopyToAsync(PipeReader source, PipeWriter destination, CancellationToken cancellationToken = default)
+    private async ValueTask<ulong> CopyToAsync(PipeReader source, PipeWriter destination, CancellationToken cancellationToken = default)
     {
         ulong totalBytesCopied = 0;
 
         while (true)
         {
-            ReadResult result = await source.ReadAsync(cancellationToken);
+            ReadResult result = await source.ReadAsync(cancellationToken).ConfigureAwait(false);
             ReadOnlySequence<byte> buffer = result.Buffer;
 
             if (buffer.Length > 0)
             {
                 foreach (var segment in buffer)
                 {
-                    await destination.WriteAsync(segment, cancellationToken);
+                    await destination.WriteAsync(segment, cancellationToken).ConfigureAwait(false);
                     totalBytesCopied += (ulong)segment.Length;
                 }
             }
@@ -632,7 +683,7 @@ internal class SessionChannel : IDuplexSessionChannel
                 break;
             }
         }
-        await source.CompleteAsync();
+        await source.CompleteAsync().ConfigureAwait(false);
 
         return totalBytesCopied;
     }

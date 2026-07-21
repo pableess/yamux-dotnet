@@ -52,6 +52,12 @@ public class SessionChannelOptions
     /// </summary>
     public int StatisticsSampleInterval { get; set; } = 1000;
 
+    /// <summary>
+    /// Validates the channel options and throws if any values are out of range.
+    /// </summary>
+    /// <exception cref="ValidationException">Thrown when <see cref="ReceiveWindowSize"/> is less than 10 KB, or
+    /// <see cref="ReceiveWindowSize"/> exceeds <see cref="ReceiveWindowUpperBound"/> when auto-tuning is enabled,
+    /// or <see cref="MaxDataFrameSize"/> is zero.</exception>
     public void Validate()
     {
         if (ReceiveWindowSize < (10 * 1024))

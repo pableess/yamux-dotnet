@@ -9,7 +9,7 @@ internal class PingManager
     private readonly ConcurrentDictionary<uint, TaskCompletionSource<long>> _pings = new();
     private uint _nextId;
 
-    public async ValueTask<TimeSpan> PingAsync(ConnectionWriter writer, CancellationToken cancellation)
+    public async ValueTask<TimeSpan> PingAsync(SessionFrameWriter writer, CancellationToken cancellation)
     {
         var opaqueValue = Interlocked.Increment(ref _nextId);
 
@@ -27,7 +27,7 @@ internal class PingManager
 
         try
         {
-            await writer.WriteAsync(Frame.CreatePingRequestFrame(opaqueValue), cancellation);
+            await writer.WriteAsync(Frame.CreatePingRequestFrame(opaqueValue), cancellation).ConfigureAwait(false);
         }
         catch
         {
@@ -35,11 +35,12 @@ internal class PingManager
             throw;
         }
 
-        var stop = await tcs.Task;
-        return TimeSpan.FromTicks(stop - start);
+        var stop = await tcs.Task.ConfigureAwait(false);
+        var elapsedTicks = stop - start;
+        return TimeSpan.FromTicks(elapsedTicks * TimeSpan.TicksPerSecond / Stopwatch.Frequency);
     }
 
-    public void HandlePing(FrameHeader frameHeader, ConnectionWriter writer, CancellationToken token)
+    public async ValueTask HandlePingAsync(FrameHeader frameHeader, SessionFrameWriter writer, CancellationToken token)
     {
         if (frameHeader.Flags.HasFlag(Flags.ACK))
         {
@@ -50,7 +51,7 @@ internal class PingManager
         }
         else
         {
-            _ = writer.WriteAsync(Frame.CreatePingResponseFrame(frameHeader), token);
+            await writer.WriteAsync(Frame.CreatePingResponseFrame(frameHeader), token).ConfigureAwait(false);
         }
     }
 

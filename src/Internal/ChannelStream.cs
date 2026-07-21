@@ -28,7 +28,7 @@ internal class ChannelStream : Stream
 
     public override void Flush() => throw new NotSupportedException();
 
-    public override Task FlushAsync(CancellationToken cancellationToken) => _outputChannel.FlushWritesAsync(cancellationToken);
+    public override Task FlushAsync(CancellationToken cancellationToken) => _outputChannel.FlushWritesAsync(cancellationToken).AsTask();
 
     public override long Seek(long offset, SeekOrigin origin)
     {
