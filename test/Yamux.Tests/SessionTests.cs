@@ -578,15 +578,15 @@ public class SessionTests
     public async Task OpenChannelWaitForAckTest()
     {
         (var client, var server) = FullDuplexStream.CreatePair();
-        using var clientOpened = new ManualResetEventSlim(false);
 
         var serverTask = Task.Run(async () =>
         {
-            await using var serverSession = new Session(new StreamPeer(server), false);
+            await using var serverSession = new Session(new StreamPeer(server), false, options: new SessionOptions
+            {
+                EnableKeepAlive = false
+            });
             serverSession.Start();
             using var channel = await serverSession.AcceptAsync(TestContext.Current.CancellationToken);
-
-            clientOpened.Wait(3000);
 
             byte[] received = new byte[64];
             long index = 0;
@@ -617,12 +617,12 @@ public class SessionTests
         {
             await using var clientSession = new Session(new StreamPeer(client), true, options: new SessionOptions
             {
-                StreamOpenTimeout = TimeSpan.Zero
+                StreamOpenTimeout = TimeSpan.Zero,
+                EnableKeepAlive = false
             });
             clientSession.Start();
 
             using var channel = await clientSession.OpenChannelAsync(waitForAcknowledgement: true, cancellationToken: TestContext.Current.CancellationToken);
-            clientOpened.Set();
 
             await channel.WriteAsync(new byte[64], TestContext.Current.CancellationToken);
 
@@ -633,7 +633,7 @@ public class SessionTests
             channel.Dispose();
         }, TestContext.Current.CancellationToken);
 
-        await Task.WhenAll(serverTask, clientTask);
+        await Task.WhenAll(serverTask, clientTask).WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
     }
 
     [Fact]

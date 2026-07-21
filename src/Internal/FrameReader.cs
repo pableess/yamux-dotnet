@@ -148,6 +148,8 @@ internal class FrameReader
             return;
         }
 
+        channel.ProcessIncomingFlags(frameHeader.Flags);
+
         if (frameHeader.Length > channel.ReceiveWindowUpperBound)
         {
             Session.SessionTracer.TraceEvent(TraceEventType.Error, 0, $"[Err] yamux: receive window exceeded (stream: {channel.Id}, length: {frameHeader.Length}, max: {channel.ReceiveWindowUpperBound})");

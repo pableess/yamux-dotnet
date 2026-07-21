@@ -112,19 +112,18 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
 
         _channelManager.AddChannel(id, channel);
 
-        channel.SendWindowUpdate(0);
-
+        TaskCompletionSource<IDuplexSessionChannel>? waitForAck = null;
         if (waitForAcknowledgement)
         {
-            TaskCompletionSource<IDuplexSessionChannel> tcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            waitForAck = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
             if (cancellationToken != default)
             {
                 var registration = cancellationToken.Register(() =>
                 {
-                    tcs.TrySetCanceled(cancellationToken);
+                    waitForAck.TrySetCanceled(cancellationToken);
                 });
-                tcs.Task.ContinueWith(t =>
+                waitForAck.Task.ContinueWith(t =>
                 {
                     registration.Dispose();
                 });
@@ -133,24 +132,33 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
             if (_sessionOptions.StreamOpenTimeout > TimeSpan.Zero)
             {
                 var timeoutCts = new CancellationTokenSource(_sessionOptions.StreamOpenTimeout);
-                timeoutCts.Token.Register(() =>
+                timeoutCts.Token.Register(async () =>
                 {
-                    if (!tcs.Task.IsCompleted)
+                    if (!waitForAck.Task.IsCompleted)
                     {
-                        tcs.TrySetException(new TimeoutException("Stream open timeout exceeded"));
+                        waitForAck.TrySetException(new TimeoutException("Stream open timeout exceeded"));
+                        try { await CloseAsync(); } catch { }
                     }
                 });
-                tcs.Task.ContinueWith(_ =>
+                waitForAck.Task.ContinueWith(_ =>
                 {
                     try { timeoutCts.Dispose(); } catch { }
                 }, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
             }
 
-            _channelManager.TrackConnect(id, tcs);
-            return new ValueTask<IDuplexSessionChannel>(tcs.Task);
+            _channelManager.TrackConnect(id, waitForAck);
+        }
+
+        // This will send SYN frame
+        channel.SendWindowUpdate(0);
+
+        if (waitForAck != null)
+        {
+            return new ValueTask<IDuplexSessionChannel>(waitForAck.Task);
         }
 
         return ValueTask.FromResult((IDuplexSessionChannel)channel);
+           
     }
 
     /// <summary>
