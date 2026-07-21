@@ -181,19 +181,30 @@ await using var session = new Session(new StreamPeer(client), true);
         {
             await using var session = new Session(new StreamPeer(server), false);
             session.Start();
-            using var channel = await session.AcceptAsync();
-
+            IDuplexSessionChannel? channel = null;
             try
             {
-                ReadResult res;
-                do
-                {
-                    res = await channel.Input.ReadAsync();
-                    channel.Input.AdvanceTo(res.Buffer.End, res.Buffer.End);
-                } while (!res.IsCanceled && !res.IsCompleted);
+                channel = await session.AcceptAsync();
             }
-            catch (YamuxException)
+            catch (SessionException)
             {
+                return;
+            }
+
+            using (channel)
+            {
+                try
+                {
+                    ReadResult res;
+                    do
+                    {
+                        res = await channel.Input.ReadAsync();
+                        channel.Input.AdvanceTo(res.Buffer.End, res.Buffer.End);
+                    } while (!res.IsCanceled && !res.IsCompleted);
+                }
+                catch (YamuxException)
+                {
+                }
             }
         });
 
