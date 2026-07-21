@@ -116,7 +116,7 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
 
         if (waitForAcknowledgement)
         {
-            TaskCompletionSource<IDuplexSessionChannel> tcs = new TaskCompletionSource<IDuplexSessionChannel>();
+            TaskCompletionSource<IDuplexSessionChannel> tcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
             if (cancellationToken != default)
             {
@@ -199,7 +199,14 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
                 throw new SessionException(SessionErrorCode.SessionShutdown, "Session has been closed");
             }
 
-            channel.Accept();
+            try
+            {
+                channel.Accept();
+            }
+            catch (SessionChannelException)
+            {
+                throw new SessionException(SessionErrorCode.SessionShutdown, "Session has been closed");
+            }
 
             await channel.ApplyOptionsAsync(channelOptions, cancellationToken);
             return channel;
