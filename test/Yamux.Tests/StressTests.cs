@@ -2,6 +2,7 @@ using AwesomeAssertions;
 using Nerdbank.Streams;
 using System.Collections.Concurrent;
 using System.IO.Pipelines;
+using Xunit;
 
 namespace Yamux.Tests;
 
@@ -13,7 +14,7 @@ public class StressTests
         var channels = 200;
         (var client, var server) = FullDuplexStream.CreatePair();
 
-        var serverTask = Task.Run(async () =>
+var serverTask = Task.Run(async () =>
         {
             await using var session = new Session(new StreamPeer(server), false);
             session.Start();
@@ -29,18 +30,18 @@ public class StressTests
                         ReadResult res;
                         do
                         {
-                            res = await channel.Input.ReadAsync();
+res = await channel.Input.ReadAsync(TestContext.Current.CancellationToken);
                             channel.Input.AdvanceTo(res.Buffer.End, res.Buffer.End);
                         } while (!res.IsCanceled && !res.IsCompleted);
                     }
                     catch
                     {
                     }
-                }));
+                }, TestContext.Current.CancellationToken));
             }
 
             await Task.WhenAll(tasks);
-        });
+        }, TestContext.Current.CancellationToken);
 
         var clientTask = Task.Run(async () =>
         {
@@ -53,14 +54,14 @@ public class StressTests
                 tasks.Add(Task.Run(async () =>
                 {
                     using var channel = await session.OpenChannelAsync();
-                    await channel.WriteAsync(new byte[64]);
+                    await channel.WriteAsync(new byte[64], TestContext.Current.CancellationToken);
                     channel.Close();
                     await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
-                }));
+                }, TestContext.Current.CancellationToken));
             }
 
             await Task.WhenAll(tasks);
-        });
+        }, TestContext.Current.CancellationToken);
 
         await Task.WhenAll(serverTask, clientTask);
     }
@@ -71,7 +72,7 @@ public class StressTests
         (var client, var server) = FullDuplexStream.CreatePair();
         var iterations = 50;
 
-        var serverTask = Task.Run(async () =>
+var serverTask = Task.Run(async () =>
         {
             await using var session = new Session(new StreamPeer(server), false);
             session.Start();
@@ -84,15 +85,15 @@ public class StressTests
                     ReadResult res;
                     do
                     {
-                        res = await channel.Input.ReadAsync();
-                        channel.Input.AdvanceTo(res.Buffer.End, res.Buffer.End);
-                    } while (!res.IsCanceled && !res.IsCompleted);
+res = await channel.Input.ReadAsync(TestContext.Current.CancellationToken);
+                    channel.Input.AdvanceTo(res.Buffer.End, res.Buffer.End);
+                } while (!res.IsCanceled && !res.IsCompleted);
                 }
                 catch
                 {
                 }
             }
-        });
+        }, TestContext.Current.CancellationToken);
 
         var clientTask = Task.Run(async () =>
         {
@@ -102,11 +103,11 @@ public class StressTests
             for (int i = 0; i < iterations; i++)
             {
                 using var channel = await session.OpenChannelAsync();
-                await channel.WriteAsync(new byte[16]);
+                await channel.WriteAsync(new byte[16], TestContext.Current.CancellationToken);
                 channel.Close();
                 await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(3));
             }
-        });
+        }, TestContext.Current.CancellationToken);
 
         await Task.WhenAll(serverTask, clientTask);
     }
@@ -128,15 +129,15 @@ public class StressTests
             session.Start();
             using var channel = await session.AcceptAsync();
 
-            await channel.WriteAsync(data);
+            await channel.WriteAsync(data, TestContext.Current.CancellationToken);
             channel.Close();
 
             var ms = new MemoryStream();
-            await channel.Input.CopyToAsync(ms);
+            await channel.Input.CopyToAsync(ms, TestContext.Current.CancellationToken);
             serverReceived = ms.ToArray();
 
             await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(3));
-        });
+        }, TestContext.Current.CancellationToken);
 
         var clientTask = Task.Run(async () =>
         {
@@ -144,15 +145,15 @@ public class StressTests
             session.Start();
             using var channel = await session.OpenChannelAsync();
 
-            await channel.WriteAsync(data);
+            await channel.WriteAsync(data, TestContext.Current.CancellationToken);
             channel.Close();
 
             var ms = new MemoryStream();
-            await channel.Input.CopyToAsync(ms);
+            await channel.Input.CopyToAsync(ms, TestContext.Current.CancellationToken);
             clientReceived = ms.ToArray();
 
             await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(3));
-        });
+        }, TestContext.Current.CancellationToken);
 
         await Task.WhenAll(serverTask, clientTask);
         serverReceived.Should().NotBeNull();
@@ -177,10 +178,10 @@ public class StressTests
             using var stream = channel.AsStream();
 
             using var ms = new MemoryStream(data);
-            await ms.CopyToAsync(stream);
+            await ms.CopyToAsync(stream, TestContext.Current.CancellationToken);
             channel.Close();
             await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
-        });
+        }, TestContext.Current.CancellationToken);
 
         var clientTask = Task.Run(async () =>
         {
@@ -190,9 +191,9 @@ public class StressTests
             using var stream = channel.AsStream();
 
             using var ms = new MemoryStream();
-            await stream.CopyToAsync(ms);
+            await stream.CopyToAsync(ms, TestContext.Current.CancellationToken);
             result = ms.ToArray();
-        });
+        }, TestContext.Current.CancellationToken);
 
         await Task.WhenAll(serverTask, clientTask);
         result.Should().NotBeNull();

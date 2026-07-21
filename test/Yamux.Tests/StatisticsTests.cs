@@ -47,7 +47,7 @@ namespace Yamux.Tests
         {
             var stats = new Statistics(1000, default);
             stats.UpdateSent(500);
-            await Task.Delay(1100);
+            await Task.Delay(1100, TestContext.Current.CancellationToken);
             stats.SendRate.Bytes.Should().Be(500);
         }
 
@@ -56,7 +56,7 @@ namespace Yamux.Tests
         {
             var stats = new Statistics(1000, default);
             stats.UpdateReceived(2000);
-            await Task.Delay(1100);
+            await Task.Delay(1100, TestContext.Current.CancellationToken);
             stats.ReceiveRate.Bytes.Should().Be(2000);
         }
 

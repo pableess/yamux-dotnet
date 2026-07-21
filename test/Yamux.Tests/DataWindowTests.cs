@@ -51,7 +51,7 @@ namespace Yamux.Tests
             var task = Task.Run(() =>
             {
                 consumed = dw.WaitConsume(48 * 1024, TimeSpan.FromMilliseconds(5000));
-            });
+            }, TestContext.Current.CancellationToken);
 
             Thread.Sleep(5); // Simulate some delay, to allow thread to start
 
@@ -75,11 +75,11 @@ namespace Yamux.Tests
             var task1 = Task.Run(() =>
             {
                 consumed1 = dw.WaitConsume(256, TimeSpan.FromMilliseconds(5000));
-            });
+            }, TestContext.Current.CancellationToken);
             var task2 = Task.Run(() =>
             {
                 consumed2 = dw.WaitConsume(1024, TimeSpan.FromMilliseconds(5000));
-            });
+            }, TestContext.Current.CancellationToken);
 
             Thread.Sleep(5); // Simulate some delay, to allow thread to start
 
@@ -105,7 +105,7 @@ namespace Yamux.Tests
             _ = Task.Run(() =>
             {
                 dw.Extend(1024 * 16);
-            });
+            }, TestContext.Current.CancellationToken);
 
             var result = await consumeTask;
             result.Should().Be(1024);
@@ -123,7 +123,7 @@ namespace Yamux.Tests
             _ = Task.Run(() =>
             {
                 dw.Extend(1024 * 16);
-            });
+            }, TestContext.Current.CancellationToken);
 
             var consumed2 = dw.WaitConsume(2048, TimeSpan.FromMilliseconds(5000));
 

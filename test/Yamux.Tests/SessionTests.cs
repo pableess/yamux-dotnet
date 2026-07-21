@@ -29,13 +29,13 @@ public class SessionTests
             await using var serverSession = new Session(new StreamPeer(server), false);
             serverSession.Start();
 
-            using var channel = await serverSession.AcceptAsync();
+            using var channel = await serverSession.AcceptAsync(TestContext.Current.CancellationToken);
 
             long index = 0;
             ReadResult res;
             do
             {
-                res = await channel.Input.ReadAsync();
+                res = await channel.Input.ReadAsync(TestContext.Current.CancellationToken);
                 if (res.Buffer.Length > 0)
                 {
                     res.Buffer.CopyTo(result.Slice((int)index, (int)res.Buffer.Length).Span);
@@ -47,14 +47,14 @@ public class SessionTests
             channel.Close();
             await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
             channel.Dispose();
-        });
+        }, TestContext.Current.CancellationToken);
 
         var clientTask = Task.Run(async () =>
         {
             await using var clientSession = new Session(new StreamPeer(client), true);
             clientSession.Start();
 
-            using var channel = await clientSession.OpenChannelAsync();
+            using var channel = await clientSession.OpenChannelAsync(cancellationToken: TestContext.Current.CancellationToken);
 
             var size = buffer.Length;
             int current = 0;
@@ -66,14 +66,14 @@ public class SessionTests
                 {
                     var end = current + chunkSize;
                     var slice = buffer.Slice(current, end >= buffer.Length ? buffer.Length - current : chunkSize);
-                    await channel.WriteAsync(slice, CancellationToken.None);
+                    await channel.WriteAsync(slice, TestContext.Current.CancellationToken);
                 }
                 current += chunkSize;
             }
 
             channel.Close();
             await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
-        });
+        }, TestContext.Current.CancellationToken);
 
         await Task.WhenAll(serverTask, clientTask);
         result.ToArray().Should().BeEquivalentTo(buffer.ToArray());
@@ -105,7 +105,7 @@ public class SessionTests
                 ReadResult res;
                 do
                 {
-                    res = await channel.Input.ReadAsync();
+                    res = await channel.Input.ReadAsync(TestContext.Current.CancellationToken);
                     if (res.Buffer.Length > 0)
                     {
                         res.Buffer.CopyTo(result.Slice((int)index, (int)res.Buffer.Length).Span);
@@ -119,13 +119,13 @@ public class SessionTests
                 channel.Dispose();
             }
 
-            using var channel1 = await serverSession.AcceptAsync();
+            using var channel1 = await serverSession.AcceptAsync(TestContext.Current.CancellationToken);
             var taskA = ReadChannelAsync(channel1, result1);
-            using var channel2 = await serverSession.AcceptAsync();
+            using var channel2 = await serverSession.AcceptAsync(TestContext.Current.CancellationToken);
             var taskB = ReadChannelAsync(channel2, result2);
 
             await Task.WhenAll(taskA, taskB);
-        });
+        }, TestContext.Current.CancellationToken);
 
         var clientTask = Task.Run(async () =>
         {
@@ -134,7 +134,7 @@ public class SessionTests
 
             async Task SendOnChannelAsync(Memory<byte> buf)
             {
-                using var channel = await clientSession.OpenChannelAsync();
+                using var channel = await clientSession.OpenChannelAsync(cancellationToken: TestContext.Current.CancellationToken);
                 var size = buf.Length;
                 int current = 0;
                 int chunkSize = 1024 * 4;
@@ -144,7 +144,7 @@ public class SessionTests
                     if (buf.Length > chunkSize)
                     {
                         var end = current + chunkSize;
-                        await channel.WriteAsync(buf.Slice(current, end >= buf.Length ? buf.Length - current : chunkSize), CancellationToken.None);
+                        await channel.WriteAsync(buf.Slice(current, end >= buf.Length ? buf.Length - current : chunkSize), TestContext.Current.CancellationToken);
                     }
                     current += chunkSize;
                 }
@@ -157,7 +157,7 @@ public class SessionTests
             var taskB = SendOnChannelAsync(buffer2);
 
             await Task.WhenAll(taskA, taskB);
-        });
+        }, TestContext.Current.CancellationToken);
 
         await Task.WhenAll(serverTask, clientTask);
 
@@ -175,7 +175,7 @@ public class SessionTests
         {
             await using var serverSession = new Session(new StreamPeer(server), false);
             serverSession.Start();
-            using var channel = await serverSession.AcceptAsync();
+            using var channel = await serverSession.AcceptAsync(TestContext.Current.CancellationToken);
 
             Func<Task> read = async () =>
             {
@@ -184,7 +184,7 @@ public class SessionTests
                     ReadResult res;
                     do
                     {
-                        res = await channel.Input.ReadAsync();
+                        res = await channel.Input.ReadAsync(TestContext.Current.CancellationToken);
                         if (res.Buffer.Length > 0)
                             channel.Input.AdvanceTo(res.Buffer.End, res.Buffer.End);
                     } while (!res.IsCanceled && !res.IsCompleted);
@@ -195,26 +195,26 @@ public class SessionTests
             };
 
             await read();
-        });
+        }, TestContext.Current.CancellationToken);
 
         var clientTask = Task.Run(async () =>
         {
             await using var clientSession = new Session(new StreamPeer(client), true);
             clientSession.Start();
 
-            using var channel = await clientSession.OpenChannelAsync();
+            using var channel = await clientSession.OpenChannelAsync(cancellationToken: TestContext.Current.CancellationToken);
 
             var data = faker.Random.Chars(count: 1024 * 750);
             var buffer = Encoding.UTF8.GetBytes(data).AsMemory();
 
-            await channel.WriteAsync(buffer, CancellationToken.None);
-            await channel.WriteAsync(buffer, CancellationToken.None);
-            await channel.WriteAsync(buffer, CancellationToken.None);
-            await channel.WriteAsync(buffer, CancellationToken.None);
-            await channel.WriteAsync(buffer, CancellationToken.None);
+            await channel.WriteAsync(buffer, TestContext.Current.CancellationToken);
+            await channel.WriteAsync(buffer, TestContext.Current.CancellationToken);
+            await channel.WriteAsync(buffer, TestContext.Current.CancellationToken);
+            await channel.WriteAsync(buffer, TestContext.Current.CancellationToken);
+            await channel.WriteAsync(buffer, TestContext.Current.CancellationToken);
 
             await clientSession.DisposeAsync();
-        });
+        }, TestContext.Current.CancellationToken);
 
         await Task.WhenAll(serverTask, clientTask);
     }
@@ -233,31 +233,31 @@ public class SessionTests
         {
             await using var serverSession = new Session(new StreamPeer(server), false);
             serverSession.Start();
-            using var channel = await serverSession.AcceptAsync();
+            using var channel = await serverSession.AcceptAsync(TestContext.Current.CancellationToken);
             using var stream = channel.AsStream();
 
             using MemoryStream ms = new MemoryStream(buffer);
-            await ms.CopyToAsync(stream);
+            await ms.CopyToAsync(stream, TestContext.Current.CancellationToken);
 
             channel.Close();
             await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
             channel.Dispose();
-        });
+        }, TestContext.Current.CancellationToken);
 
         var clientTask = Task.Run(async () =>
         {
             await using var clientSession = new Session(new StreamPeer(client), true);
             clientSession.Start();
 
-            using var channel = await clientSession.OpenChannelAsync();
+            using var channel = await clientSession.OpenChannelAsync(cancellationToken: TestContext.Current.CancellationToken);
             using var stream = channel.AsStream();
 
             using MemoryStream ms = new MemoryStream();
-            await stream.CopyToAsync(ms);
+            await stream.CopyToAsync(ms, TestContext.Current.CancellationToken);
 
             result = ms.ToArray();
             stream.Close();
-        });
+        }, TestContext.Current.CancellationToken);
 
         await Task.WhenAll(serverTask, clientTask);
 
@@ -274,21 +274,21 @@ public class SessionTests
         {
             await using var serverSession = new Session(new StreamPeer(server), false);
             serverSession.Start();
-            using var channel = await serverSession.AcceptAsync();
+            using var channel = await serverSession.AcceptAsync(TestContext.Current.CancellationToken);
 
             Func<Task> read = async () =>
             {
                 ReadResult res;
                 do
                 {
-                    res = await channel.Input.ReadAsync(default);
+                    res = await channel.Input.ReadAsync(TestContext.Current.CancellationToken);
                     channel.Input.AdvanceTo(res.Buffer.End, res.Buffer.End);
                 } while (!res.IsCanceled && !res.IsCompleted);
             };
 
             var ex = await Assert.ThrowsAsync<SessionException>(read);
             ex.ErrorCode.Should().Be(SessionErrorCode.InvalidVersion);
-        });
+        }, TestContext.Current.CancellationToken);
 
         var clientTask = Task.Run(async () =>
         {
@@ -297,23 +297,23 @@ public class SessionTests
                 await using var clientSession = new Session(new StreamPeer(client), true);
                 clientSession.Start();
 
-                using var channel = await clientSession.OpenChannelAsync();
+                using var channel = await clientSession.OpenChannelAsync(cancellationToken: TestContext.Current.CancellationToken);
 
                 var faker = new Faker();
                 var data = faker.Random.Chars(count: 1024 * 312);
                 var buffer = Encoding.UTF8.GetBytes(data).AsMemory();
-                await channel.WriteAsync(buffer, default);
+                await channel.WriteAsync(buffer, TestContext.Current.CancellationToken);
 
-                await client.WriteAsync(new byte[] { 0x01, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20 }.AsMemory(), default);
+                await client.WriteAsync(new byte[] { 0x01, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20 }.AsMemory(), TestContext.Current.CancellationToken);
                 await client.FlushAsync();
 
-                await channel.WriteAsync(buffer.Slice(0, 64), default);
-                await Task.Delay(200);
+                await channel.WriteAsync(buffer.Slice(0, 64), TestContext.Current.CancellationToken);
+                await Task.Delay(200, TestContext.Current.CancellationToken);
             }
             catch
             {
             }
-        });
+        }, TestContext.Current.CancellationToken);
 
         await Task.WhenAll(serverTask, clientTask);
     }
@@ -328,14 +328,14 @@ public class SessionTests
         {
             await using var serverSession = new Session(new StreamPeer(server), false);
             serverSession.Start();
-            using var channel = await serverSession.AcceptAsync();
+            using var channel = await serverSession.AcceptAsync(TestContext.Current.CancellationToken);
 
             byte[] received = new byte[data.Length];
             long index = 0;
             ReadResult res;
             do
             {
-                res = await channel.Input.ReadAsync();
+                res = await channel.Input.ReadAsync(TestContext.Current.CancellationToken);
                 if (res.Buffer.Length > 0)
                 {
                     res.Buffer.CopyTo(received.AsMemory((int)index, (int)res.Buffer.Length).Span);
@@ -349,26 +349,26 @@ public class SessionTests
             channel.Close();
             await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
             channel.Dispose();
-        });
+        }, TestContext.Current.CancellationToken);
 
         var clientTask = Task.Run(async () =>
         {
             await using var clientSession = new Session(new StreamPeer(client), true);
             clientSession.Start();
-            using var channel = await clientSession.OpenChannelAsync();
+            using var channel = await clientSession.OpenChannelAsync(cancellationToken: TestContext.Current.CancellationToken);
 
-            await channel.WriteAsync(data, CancellationToken.None);
+            await channel.WriteAsync(data, TestContext.Current.CancellationToken);
 
             // half-close: close write side
             channel.Close();
 
             // verify write throws after close
-            Func<Task> writeAfterClose = () => channel.WriteAsync(new byte[1], CancellationToken.None).AsTask();
+            Func<Task> writeAfterClose = () => channel.WriteAsync(new byte[1], TestContext.Current.CancellationToken).AsTask();
             await writeAfterClose.Should().ThrowAsync<SessionChannelException>();
 
             await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
             channel.Dispose();
-        });
+        }, TestContext.Current.CancellationToken);
 
         await Task.WhenAll(serverTask, clientTask);
     }
@@ -383,14 +383,14 @@ public class SessionTests
         {
             await using var serverSession = new Session(new StreamPeer(server), false);
             serverSession.Start();
-            using var channel = await serverSession.AcceptAsync();
+            using var channel = await serverSession.AcceptAsync(TestContext.Current.CancellationToken);
 
             try
             {
                 ReadResult res;
                 do
                 {
-                    res = await channel.Input.ReadAsync();
+                    res = await channel.Input.ReadAsync(TestContext.Current.CancellationToken);
                     if (res.Buffer.Length > 0)
                         channel.Input.AdvanceTo(res.Buffer.End, res.Buffer.End);
                 } while (!res.IsCanceled && !res.IsCompleted);
@@ -400,25 +400,25 @@ public class SessionTests
             }
 
             channel.Dispose();
-        });
+        }, TestContext.Current.CancellationToken);
 
         var clientTask = Task.Run(async () =>
         {
             await using var clientSession = new Session(new StreamPeer(client), true);
             clientSession.Start();
-            using var channel = await clientSession.OpenChannelAsync();
+            using var channel = await clientSession.OpenChannelAsync(cancellationToken: TestContext.Current.CancellationToken);
 
-            await channel.WriteAsync(data, CancellationToken.None);
+            await channel.WriteAsync(data, TestContext.Current.CancellationToken);
 
             channel.Abort();
 
             Func<Task> readAfterAbort = async () =>
             {
-                var res = await channel.Input.ReadAsync();
+                var res = await channel.Input.ReadAsync(TestContext.Current.CancellationToken);
                 channel.Input.AdvanceTo(res.Buffer.End, res.Buffer.End);
             };
             (await readAfterAbort.Should().ThrowAsync<Exception>()).Which.Should().BeOfType<SessionChannelException>();
-        });
+        }, TestContext.Current.CancellationToken);
 
         await Task.WhenAll(serverTask, clientTask);
     }
@@ -439,12 +439,12 @@ public class SessionTests
                 }
             });
             serverSession.Start();
-            using var channel = await serverSession.AcceptAsync();
+            using var channel = await serverSession.AcceptAsync(TestContext.Current.CancellationToken);
 
             // don't read - this exhausts the remote window
-            await Task.Delay(3000);
+            await Task.Delay(3000, TestContext.Current.CancellationToken);
             channel.Dispose();
-        });
+        }, TestContext.Current.CancellationToken);
 
         var clientTask = Task.Run(async () =>
         {
@@ -456,21 +456,21 @@ public class SessionTests
                 }
             });
             clientSession.Start();
-            using var channel = await clientSession.OpenChannelAsync();
+            using var channel = await clientSession.OpenChannelAsync(cancellationToken: TestContext.Current.CancellationToken);
 
             // write enough to exhaust the 256KB window
             for (int i = 0; i < 16; i++)
             {
-                await channel.WriteAsync(buffer, CancellationToken.None);
+                await channel.WriteAsync(buffer, TestContext.Current.CancellationToken);
             }
 
             // next write should block because window is exhausted
-            var blockedWrite = channel.WriteAsync(buffer, CancellationToken.None).AsTask();
-            var timeout = Task.Delay(1000);
+            var blockedWrite = channel.WriteAsync(buffer, TestContext.Current.CancellationToken).AsTask();
+            var timeout = Task.Delay(1000, TestContext.Current.CancellationToken);
             var completed = await Task.WhenAny(blockedWrite, timeout);
 
             completed.Should().Be(timeout);
-        });
+        }, TestContext.Current.CancellationToken);
 
         await Task.WhenAll(serverTask, clientTask);
     }
@@ -485,31 +485,31 @@ public class SessionTests
             await using var serverSession = new Session(new StreamPeer(server), false);
             serverSession.Start();
 
-            using var channel1 = await serverSession.AcceptAsync();
+            using var channel1 = await serverSession.AcceptAsync(TestContext.Current.CancellationToken);
             await serverSession.GoAwayAsync();
 
-            await channel1.WriteAsync(new byte[64], CancellationToken.None);
+            await channel1.WriteAsync(new byte[64], TestContext.Current.CancellationToken);
 
             channel1.Close();
             await channel1.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
             channel1.Dispose();
-        });
+        }, TestContext.Current.CancellationToken);
 
         var clientTask = Task.Run(async () =>
         {
             await using var clientSession = new Session(new StreamPeer(client), true);
             clientSession.Start();
 
-            using var channel1 = await clientSession.OpenChannelAsync();
-            await Task.Delay(500);
+            using var channel1 = await clientSession.OpenChannelAsync(cancellationToken: TestContext.Current.CancellationToken);
+            await Task.Delay(500, TestContext.Current.CancellationToken);
 
-            Func<Task> openAfterGoAway = () => clientSession.OpenChannelAsync(false).AsTask();
+            Func<Task> openAfterGoAway = () => clientSession.OpenChannelAsync(false, cancellationToken: TestContext.Current.CancellationToken).AsTask();
             await openAfterGoAway.Should().ThrowAsync<SessionException>();
 
             ReadResult res;
             do
             {
-                res = await channel1.Input.ReadAsync();
+                res = await channel1.Input.ReadAsync(TestContext.Current.CancellationToken);
                 if (res.Buffer.Length > 0)
                     channel1.Input.AdvanceTo(res.Buffer.End, res.Buffer.End);
             } while (!res.IsCanceled && !res.IsCompleted);
@@ -517,7 +517,7 @@ public class SessionTests
             channel1.Close();
             await channel1.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
             channel1.Dispose();
-        });
+        }, TestContext.Current.CancellationToken);
 
         await Task.WhenAll(serverTask, clientTask);
     }
@@ -536,35 +536,35 @@ public class SessionTests
         {
             await using var serverSession = new Session(new StreamPeer(server), false);
             serverSession.Start();
-            using var channel = await serverSession.AcceptAsync();
+            using var channel = await serverSession.AcceptAsync(TestContext.Current.CancellationToken);
 
-            await channel.WriteAsync(serverToClient, CancellationToken.None);
+            await channel.WriteAsync(serverToClient, TestContext.Current.CancellationToken);
             channel.Close();
 
             var ms = new MemoryStream();
-            await channel.Input.CopyToAsync(ms);
+            await channel.Input.CopyToAsync(ms, TestContext.Current.CancellationToken);
             serverReceived = ms.ToArray();
 
             await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
             channel.Dispose();
-        });
+        }, TestContext.Current.CancellationToken);
 
         var clientTask = Task.Run(async () =>
         {
             await using var clientSession = new Session(new StreamPeer(client), true);
             clientSession.Start();
-            using var channel = await clientSession.OpenChannelAsync();
+            using var channel = await clientSession.OpenChannelAsync(cancellationToken: TestContext.Current.CancellationToken);
 
-            await channel.WriteAsync(clientToServer, CancellationToken.None);
+            await channel.WriteAsync(clientToServer, TestContext.Current.CancellationToken);
             channel.Close();
 
             var ms = new MemoryStream();
-            await channel.Input.CopyToAsync(ms);
+            await channel.Input.CopyToAsync(ms, TestContext.Current.CancellationToken);
             clientReceived = ms.ToArray();
 
             await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
             channel.Dispose();
-        });
+        }, TestContext.Current.CancellationToken);
 
         await Task.WhenAll(serverTask, clientTask);
 
@@ -584,7 +584,7 @@ public class SessionTests
         {
             await using var serverSession = new Session(new StreamPeer(server), false);
             serverSession.Start();
-            using var channel = await serverSession.AcceptAsync();
+            using var channel = await serverSession.AcceptAsync(TestContext.Current.CancellationToken);
 
             clientOpened.Wait(3000);
 
@@ -595,7 +595,7 @@ public class SessionTests
                 ReadResult res;
                 do
                 {
-                    res = await channel.Input.ReadAsync();
+                    res = await channel.Input.ReadAsync(TestContext.Current.CancellationToken);
                     if (res.Buffer.Length > 0)
                     {
                         res.Buffer.CopyTo(received.AsMemory((int)index).Span);
@@ -611,7 +611,7 @@ public class SessionTests
             channel.Close();
             await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(3));
             channel.Dispose();
-        });
+        }, TestContext.Current.CancellationToken);
 
         var clientTask = Task.Run(async () =>
         {
@@ -621,17 +621,17 @@ public class SessionTests
             });
             clientSession.Start();
 
-            using var channel = await clientSession.OpenChannelAsync(waitForAcknowledgement: true);
+            using var channel = await clientSession.OpenChannelAsync(waitForAcknowledgement: true, cancellationToken: TestContext.Current.CancellationToken);
             clientOpened.Set();
 
-            await channel.WriteAsync(new byte[64], CancellationToken.None);
+            await channel.WriteAsync(new byte[64], TestContext.Current.CancellationToken);
 
             channel.Close();
             await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(3));
 
-            await Task.Delay(500);
+            await Task.Delay(500, TestContext.Current.CancellationToken);
             channel.Dispose();
-        });
+        }, TestContext.Current.CancellationToken);
 
         await Task.WhenAll(serverTask, clientTask);
     }
@@ -645,27 +645,27 @@ public class SessionTests
         {
             await using var serverSession = new Session(new StreamPeer(server), false);
             serverSession.Start();
-            using var channel = await serverSession.AcceptAsync();
+            using var channel = await serverSession.AcceptAsync(TestContext.Current.CancellationToken);
 
-            await Task.Delay(500);
+            await Task.Delay(500, TestContext.Current.CancellationToken);
 
             channel.Close();
             await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
             channel.Dispose();
-        });
+        }, TestContext.Current.CancellationToken);
 
         var clientTask = Task.Run(async () =>
         {
             await using var clientSession = new Session(new StreamPeer(client), true);
             clientSession.Start();
-            using var channel = await clientSession.OpenChannelAsync();
+            using var channel = await clientSession.OpenChannelAsync(cancellationToken: TestContext.Current.CancellationToken);
 
-            await channel.WriteAsync(ReadOnlyMemory<byte>.Empty, CancellationToken.None);
+            await channel.WriteAsync(ReadOnlyMemory<byte>.Empty, TestContext.Current.CancellationToken);
 
             channel.Close();
             await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
             channel.Dispose();
-        });
+        }, TestContext.Current.CancellationToken);
 
         await Task.WhenAll(serverTask, clientTask);
     }
@@ -681,29 +681,29 @@ public class SessionTests
         {
             await using var serverSession = new Session(new StreamPeer(server), false);
             serverSession.Start();
-            using var channel = await serverSession.AcceptAsync();
+            using var channel = await serverSession.AcceptAsync(TestContext.Current.CancellationToken);
 
             var ms = new MemoryStream();
-            await channel.Input.CopyToAsync(ms);
+            await channel.Input.CopyToAsync(ms, TestContext.Current.CancellationToken);
             result = ms.ToArray();
 
             channel.Close();
             await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(5));
             channel.Dispose();
-        });
+        }, TestContext.Current.CancellationToken);
 
         var clientTask = Task.Run(async () =>
         {
             await using var clientSession = new Session(new StreamPeer(client), true);
             clientSession.Start();
-            using var channel = await clientSession.OpenChannelAsync();
+            using var channel = await clientSession.OpenChannelAsync(cancellationToken: TestContext.Current.CancellationToken);
 
-            await channel.WriteAsync(data, CancellationToken.None);
+            await channel.WriteAsync(data, TestContext.Current.CancellationToken);
 
             channel.Close();
             await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(5));
             channel.Dispose();
-        });
+        }, TestContext.Current.CancellationToken);
 
         await Task.WhenAll(serverTask, clientTask);
 
