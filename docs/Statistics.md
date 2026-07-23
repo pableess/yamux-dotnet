@@ -1,6 +1,5 @@
 ---
 title: Statistics
-nav_order: 14
 ---
 
 # Statistics

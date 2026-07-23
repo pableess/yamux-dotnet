@@ -55,6 +55,9 @@ nunit-*.xml
 [Rr]eleasePS/
 dlldata.c
 
+# Lunet build output
+docs/.lunet/build/
+
 # Benchmark Results
 BenchmarkDotNet.Artifacts/
 

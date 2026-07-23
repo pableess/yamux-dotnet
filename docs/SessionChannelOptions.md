@@ -1,6 +1,5 @@
 ---
 title: SessionChannelOptions
-nav_order: 13
 ---
 
 # SessionChannelOptions

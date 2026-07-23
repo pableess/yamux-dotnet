@@ -1,6 +1,5 @@
 ---
 title: SessionOptions
-nav_order: 12
 ---
 
 # SessionOptions
