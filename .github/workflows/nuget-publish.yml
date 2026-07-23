@@ -1,12 +1,6 @@
 name: Build and Publish NuGet Package
 on:
   push:
-    branches:
-      - main
-      - release/**
-    paths-ignore:
-      - 'docs/**'
-      - '*.md' # Optional: ignore root markdown files
     tags:
       - 'v*'
   pull_request:

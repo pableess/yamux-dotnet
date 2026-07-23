@@ -1,6 +1,5 @@
 ---
 title: Channels
-nav_order: 11
 ---
 
 # Channel Interfaces

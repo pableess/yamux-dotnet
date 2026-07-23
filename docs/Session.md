@@ -1,6 +1,5 @@
 ---
 title: Session
-nav_order: 10
 ---
 
 # Session

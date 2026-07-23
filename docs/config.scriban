@@ -1,0 +1,21 @@
+extend "lunet-io/templates"
+
+template_theme_default_mode = "dark"
+
+site_project_baseurl = "https://pableess.github.io"
+site_project_basepath = "/yamux-dotnet"
+site_project_name = "Yamux"
+site_project_description = "A .NET implementation of the HashiCorp Yamux multiplexing protocol"
+site_project_github_user = "pableess"
+site_project_github_repo = "yamux-dotnet"
+site_project_owner_name = "Paul Bleess"
+site_project_license_name = "MIT"
+site_project_content_license_name = "MIT"
+
+# Use index.md (not readme.md) as the home page
+readme_as_index = false
+
+# Suppress the theme's default readme (we use index.md instead)
+excludes.add "/readme.md"
+
+site_project_init
