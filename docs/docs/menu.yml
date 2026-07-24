@@ -1,0 +1,10 @@
+doc:
+  - {path: getting-started.md, title: "Getting Started"}
+  - {path: Session.md, title: "Session"}
+  - {path: Channels.md, title: "Channels"}
+  - {path: SessionOptions.md, title: "SessionOptions"}
+  - {path: SessionChannelOptions.md, title: "SessionChannelOptions"}
+  - {path: Statistics.md, title: "Statistics"}
+  - {path: Transport.md, title: "Transport"}
+  - {path: Exceptions.md, title: "Exceptions"}
+  - {path: Performance.md, title: "Performance"}

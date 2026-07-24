@@ -1,0 +1,22 @@
+<Solution>
+  <Folder Name="/.github/" />
+  <Folder Name="/.github/workflows/">
+    <File Path=".github/workflows/lunet-gh-pages.yml" />
+    <File Path=".github/workflows/nuget-publish.yml" />
+  </Folder>
+  <Folder Name="/benchmarks/">
+    <Project Path="benchmarks/Yamux.Benchmark/Yamux.Benchmark.csproj" />
+  </Folder>
+  <Folder Name="/samples/">
+    <Project Path="samples/FileTransfer/FileTransfer.csproj" />
+    <Project Path="samples/Sample/Sample.csproj" />
+  </Folder>
+  <Folder Name="/Solution Items/">
+    <File Path="Directory.Build.props" />
+    <File Path="README.md" />
+  </Folder>
+  <Folder Name="/test/">
+    <Project Path="test/Yamux.Tests/Yamux.Tests.csproj" />
+  </Folder>
+  <Project Path="src/Yamux.csproj" />
+</Solution>
