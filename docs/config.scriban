@@ -1,6 +1,7 @@
 extend "lunet-io/templates"
 
 template_theme_default_mode = "dark"
+template_theme_override_styles = ["/css/theme-override.scss"]
 
 site_project_baseurl = "https://pableess.github.io"
 site_project_basepath = "/yamux-dotnet"
@@ -9,8 +10,14 @@ site_project_description = "A .NET implementation of the HashiCorp Yamux multipl
 site_project_github_user = "pableess"
 site_project_github_repo = "yamux-dotnet"
 site_project_owner_name = "Paul Bleess"
+site_project_owner_alias = "pableess"
+site_project_owner_url = "https://github.com/pableess"
 site_project_license_name = "MIT"
 site_project_content_license_name = "MIT"
+site_project_content_license_url = "https://opensource.org/licenses/MIT"
+
+# Logo configuration
+site_project_logo_path = "/img/yamux.png"
 
 # Use index.md (not readme.md) as the home page
 readme_as_index = false

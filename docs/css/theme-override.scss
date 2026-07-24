@@ -1,0 +1,27 @@
+/* Round corners and transparent background for images */
+img {
+  border-radius: 8px;
+  background: transparent !important;
+}
+
+/* Lighten card backgrounds */
+.card,
+.card-header,
+.card-body {
+  background: transparent !important;
+}
+
+.card {
+  background-color: color-mix(in srgb, var(--lunet-color-surface-1) 50%, transparent) !important;
+  backdrop-filter: blur(4px);
+}
+
+/* Lighten the hero image area */
+.text-center img {
+  border-radius: 12px;
+}
+
+/* Lighten code blocks */
+pre {
+  background-color: color-mix(in srgb, var(--lunet-color-code-bg, var(--lunet-color-surface-1)) 50%, transparent) !important;
+}
