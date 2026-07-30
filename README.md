@@ -6,6 +6,11 @@
 [![.NET](https://img.shields.io/badge/.NET-9.0%20|%2010.0-512BD4)](https://dotnet.microsoft.com/)
 [![AOT Compatible](https://img.shields.io/badge/AOT-compatible-green)](https://learn.microsoft.com/dotnet/core/deploying/native-aot/)
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/yamux-dotnet.png">
+  <img alt="yamux" src="docs/img/yamux-dotnet.png" width="700">
+</picture>
+
 Yamux is a **high-performance .NET library** implementing the [HashiCorp Yamux multiplexing protocol](https://github.com/hashicorp/yamux). It enables multiple reliable, ordered, independent streams (channels) over a **single** underlying connection such as TCP — drastically reducing connection overhead in distributed systems.
 
 ```
