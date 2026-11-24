@@ -29,13 +29,23 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '9.0.x'      
+          dotnet-version: |
+            9.0.x
+            10.0.x
+            11.0.x
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
       - name: Restore dependencies
         run: dotnet restore
       - name: Build
         run: dotnet build --no-restore --configuration Release
       - name: Test
-        run: dotnet test --no-build --configuration Release --verbosity normal
+        run: |
+          dotnet test --no-build --configuration Release --framework net9.0 --verbosity normal
+          dotnet test --no-build --configuration Release --framework net10.0 --verbosity normal
+          dotnet test --no-build --configuration Release --framework net11.0 --verbosity normal
       - name: Pack
         run: dotnet pack src/Yamux.csproj --no-build --configuration Release --output ./nupkg
       - name: Set Version Variable

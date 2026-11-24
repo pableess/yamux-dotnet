@@ -21,9 +21,11 @@ public class SessionChannelOptions
     public SessionChannelOptions() { }
 
     /// <summary>
-    /// The initial size of the receive window for the channel. 
-    /// Yamux spec indicates initial size is always 256kb, but this setting will immediately increase the size to the desired size 
-    ///
+    /// The initial size of the receive window for the channel.
+    /// Yamux fixes the wire-level initial window at 256 KB; setting a larger value
+    /// immediately advertises the difference after the channel is opened. Values
+    /// below 256 KB are rejected because the window cannot be made smaller than the
+    /// protocol initial value.
     /// </summary>
     public uint ReceiveWindowSize { get; set; } = Constants.Initial_Window_Size;
 
@@ -55,16 +57,20 @@ public class SessionChannelOptions
     /// <summary>
     /// Validates the channel options and throws if any values are out of range.
     /// </summary>
-    /// <exception cref="ValidationException">Thrown when <see cref="ReceiveWindowSize"/> is less than 10 KB, or
-    /// <see cref="ReceiveWindowSize"/> exceeds <see cref="ReceiveWindowUpperBound"/> when auto-tuning is enabled,
-    /// or <see cref="MaxDataFrameSize"/> is zero.</exception>
+    /// <exception cref="ValidationException">Thrown when <see cref="ReceiveWindowSize"/> is less than 256 KB,
+    /// <see cref="ReceiveWindowUpperBound"/> is less than 256 KB, <see cref="ReceiveWindowSize"/> exceeds
+    /// <see cref="ReceiveWindowUpperBound"/>, or <see cref="MaxDataFrameSize"/> is zero.</exception>
     public void Validate()
     {
-        if (ReceiveWindowSize < (10 * 1024))
+        if (ReceiveWindowSize < Constants.Initial_Window_Size)
         {
-            throw new ValidationException($"ReceiveWindowSize must be at least 10 KB, but was {ReceiveWindowSize}");
+            throw new ValidationException($"ReceiveWindowSize must be at least {Constants.Initial_Window_Size} bytes, but was {ReceiveWindowSize}");
         }
-        if (AutoTuneReceiveWindowSize && ReceiveWindowSize > ReceiveWindowUpperBound) 
+        if (ReceiveWindowUpperBound < Constants.Initial_Window_Size)
+        {
+            throw new ValidationException($"ReceiveWindowUpperBound must be at least {Constants.Initial_Window_Size} bytes, but was {ReceiveWindowUpperBound}");
+        }
+        if (ReceiveWindowSize > ReceiveWindowUpperBound)
         {
             throw new ValidationException("ReceiveWindowSize must not exceed the ReceiveWindowUpperBound");
         }

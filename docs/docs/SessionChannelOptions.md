@@ -4,29 +4,57 @@ title: SessionChannelOptions
 
 # SessionChannelOptions
 
-The `SessionChannelOptions` class configures the behavior of a Yamux session channel.
+`SessionChannelOptions` configures flow control, framing, auto-tuning, and
+per-channel statistics.
 
 ## Properties
-- `uint ReceiveWindowSize` - Initial receive window size (default: 256 KB). Yamux spec default is 256 KB.
-- `uint ReceiveWindowUpperBound` - Maximum receive window size (default: 16 MiB).
-- `uint MaxDataFrameSize` - Maximum data frame payload size (default: 16 KiB).
-- `bool AutoTuneReceiveWindowSize` - Automatically increase window size for throughput (default: true).
-- `bool EnableStatistics` - Enables statistics collection.
-- `int StatisticsSampleInterval` - How often to sample statistics (ms, default: 1000).
 
-## Methods
-- `void Validate()` - Validates the options. Throws `ValidationException` if invalid.
+| Property | Default | Description |
+|---|---|---|
+| `uint ReceiveWindowSize` | `256 KB` | Initial receive window. The protocol initial window is fixed at 256 KB; larger values are advertised immediately after the channel opens. Minimum 256 KB. |
+| `uint ReceiveWindowUpperBound` | `16 MiB` | Maximum window for auto-tuning. Minimum 256 KB. |
+| `uint MaxDataFrameSize` | `16 KiB` | Maximum data payload per frame. Larger writes are split across frames. |
+| `bool AutoTuneReceiveWindowSize` | `true` | Grow/shrink the window using RTT and consumption rate, bounded by `ReceiveWindowUpperBound`. |
+| `bool EnableStatistics` | `false` | Enable per-channel byte/bandwidth statistics. |
+| `int StatisticsSampleInterval` | `1000` | Per-channel statistics sampling interval in milliseconds. |
+
+## Validation
+
+`Validate()` throws `System.ComponentModel.DataAnnotations.ValidationException`
+when:
+
+- `ReceiveWindowSize < 256 KB`
+- `ReceiveWindowUpperBound < 256 KB`
+- `ReceiveWindowSize > ReceiveWindowUpperBound`
+- `MaxDataFrameSize == 0`
+
+`OpenChannelAsync(SessionChannelOptions, ...)` validates the options before
+creating the channel. `Session.Start()` validates `SessionOptions.DefaultChannelOptions`.
 
 ## Example
+
 ```csharp
-var options = new SessionChannelOptions {
+var options = new SessionChannelOptions
+{
     ReceiveWindowSize = 512 * 1024,
     ReceiveWindowUpperBound = 8 * 1024 * 1024,
     MaxDataFrameSize = 32 * 1024,
-    AutoTuneReceiveWindowSize = true
+    AutoTuneReceiveWindowSize = true,
 };
 options.Validate();
+
+using var channel = await session.OpenChannelAsync(options);
 ```
 
-## Exceptions
-- `ValidationException` - Thrown if options are invalid. `ReceiveWindowSize` must be at least 10 KiB, must not exceed `ReceiveWindowUpperBound` when auto-tuning is enabled, and `MaxDataFrameSize` must be greater than zero.
+## Notes
+
+- The receive window can only grow after a channel is created; accepting a
+  channel with a smaller `ReceiveWindowSize` than its default is rejected.
+- `MaxDataFrameSize` is a sender-side setting. A write is additionally limited
+  by the peer's currently available window credit, so frames may be smaller than
+  this value.
+- For accepted channels, the input-buffer pause threshold is fixed from
+  `SessionOptions.DefaultChannelOptions` at channel creation. To change the
+  buffering threshold, configure it in the session defaults before accepting.
+- Auto-tuning is RTT/consumption based, not a bandwidth estimator. Disable it if
+  you need a fixed window.

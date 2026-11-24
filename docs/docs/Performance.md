@@ -4,48 +4,111 @@ title: Performance
 
 # Performance
 
-## Benchmark Results
+## Benchmark suite
 
-Benchmarks compare Yamux against raw TCP, the reference Go implementation, and Nerdbank.Streams.
+`benchmarks/Yamux.Benchmark` uses BenchmarkDotNet and covers C#↔C#, C#→Go,
+Nerdbank.Streams, and raw TCP.
 
-### Methodology
+| Benchmark | Topology |
+|---|---|
+| `TcpBaselineAsync` | Raw TCP baseline |
+| `TcpYamuxAsync` | C# server opens channels and writes → C# client reads (TCP) |
+| `CsharpToCsharpAsync` | C# client opens/writes → C# server drains (TCP), matching the Go benchmark direction |
+| `GoIntegrationAsync` | C# client opens/writes → Go server drains (TCP) |
+| `MemoryYamuxAsync` | C# ↔ C# over in-memory `System.IO.Pipelines` |
+| `TcpNerdbankAsync` | Nerdbank.Streams over TCP |
+| `MemoryNerdbankAsync` | Nerdbank.Streams over in-memory streams |
 
-- 32KB chunk size for all tests
-- Parameters: 1/50/500 MB total data, 1/5/20 concurrent streams
-- TCP benchmarks use loopback (127.0.0.1)
+The Go↔Go baseline is produced by `benchmarks/go-benchmark`:
+
+| Benchmark | Topology |
+|---|---|
+| `GoRawTCP` | Raw TCP baseline |
+| `GoYamux` | Go client → Go server |
+
+## Methodology
+
+- 32 KB write chunk size
+- Parameters: 1 / 50 / 500 MB total data and 1 / 5 / 20 concurrent streams
+- TCP benchmarks use loopback (`127.0.0.1`)
 - In-memory benchmarks use `System.IO.Pipelines`
-- Go comparison uses the HashiCorp Yamux reference implementation (v0.1.1)
+- Go reference implementation: HashiCorp yamux v0.1.2
 - Nerdbank.Streams uses protocol version 1
+- `CsharpToCsharpAsync` and `GoIntegrationAsync` set `MaxDataFrameSize` to 64 KB
+  and disable keep-alive
+- Benchmarks run on .NET 9, .NET 10, or .NET 11 (`--framework`)
 
-### Expected Results
+### Interpreting results
 
-Benchmarks should show:
+- The Go baseline runs entirely in a separate process. The C#↔C# benchmarks run
+  both peers in the benchmark process.
+- `GoIntegrationAsync` starts a Go server process for each invocation; this is
+  noticeable for the 1 MB cases and negligible at 500 MB.
+- `CsharpToCsharpAsync` is the direct C#↔C# counterpart of `GoIntegrationAsync`.
+- Use multiple runs and compare trends, not single absolute numbers.
 
-1. **SocketBaselineAsync** — Raw TCP throughput (theoretical maximum)
-2. **YamuxStreamAsync** — .NET Yamux over TCP with multi-stream parallelism
-3. **CsharpToGoAsync** — C# Yamux client vs Go Yamux server (interop benchmark)
-4. **NerdbankStreamsAsync** — Nerdbank.Streams over in-memory streams
-5. **YamuxInMemoryAsync** — Yamux over in-memory pipes (theoretical max)
-
-### Running Benchmarks
+## Running
 
 ```bash
 dotnet run -c Release --project benchmarks/Yamux.Benchmark
 ```
 
-## Allocation Characteristics
+Compare Go↔Go, C#↔C#, and C#→Go on Linux or macOS:
 
-The library is designed to minimize GC pressure:
+```bash
+bash benchmarks/compare.sh
+```
 
-- **`ReusableValueTaskSourcePool`** pools `TaskCompletionSource` instances used for write completion signaling
-- **`System.IO.Pipelines`** provides zero-copy buffer management for reading
-- **`Frame` struct** is stack-allocated; payload ownership is tracked via `IDisposable`
-- **`StreamIdGenerator`** uses `Interlocked.Add` for lock-free ID generation
-- **`RemoteDataWindow`** uses pooled waiter objects for async flow control
+Select a target framework:
 
-## Throughput Tuning
+```bash
+TFM=net11.0 bash benchmarks/compare.sh
+```
 
-- **`MaxDataFrameSize`** — Larger frames reduce per-frame overhead but increase latency. Default 16KB.
-- **`ReceiveWindowSize`** — Larger windows improve throughput for high-BDP connections. Default 256KB.
-- **`AutoTuneReceiveWindowSize`** — Automatically scales window up to `ReceiveWindowUpperBound` based on RTT.
-- **`ReceiveWindowUpperBound`** — Caps auto-tuning. Default 16MB.
+On Windows:
+
+```powershell
+pwsh benchmarks/compare.ps1 -Tfm net11.0
+```
+
+The script builds `benchmarks/go-server` and `benchmarks/go-benchmark`, prints the
+Go baseline, then runs the C#↔C# and C#→Go BenchmarkDotNet filters.
+
+## Allocation characteristics
+
+- Receive path uses `System.IO.Pipelines` for low-allocation buffering.
+- `SessionFrameWriter` pools `ResettableValueTaskSource` instances for frame
+  completion and reuses one growable header buffer per batch. There is no
+  per-frame `ArrayPool` rent for headers.
+- `SessionChannel.WriteAsync` avoids a linked `CancellationTokenSource` when the
+  caller's token cannot be canceled.
+- `Frame` is a value type; payload ownership is tracked via `IDisposable` for
+  transports that rent buffers.
+- `StreamIdGenerator` uses `Interlocked` and detects ID-space exhaustion.
+- `RemoteDataWindow` releases canceled/timed-out waiters without consuming window
+  credit.
+
+## Throughput tuning
+
+- **`MaxDataFrameSize`** — Larger frames reduce per-frame overhead but increase
+  latency. Default 16 KiB.
+- **`ReceiveWindowSize`** — Larger initial windows improve throughput for
+  high-bandwidth-delay connections. Minimum/protocol initial value is 256 KB.
+- **`ReceiveWindowUpperBound`** — Caps RTT-based auto-tuning. Default 16 MiB.
+- **`AutoTuneReceiveWindowSize`** — Grows/shrinks the window using RTT and
+  consumption rate. Disable it for a fixed window.
+- **`WriteSegmentBatchingEnabled` / `MinWriteBatchSize`** — Enable scatter/gather
+  writes for transports that support them; tune the batch threshold for latency
+  vs. syscall overhead.
+- **`EnableKeepAlive`** — Disable it in microbenchmarks to avoid ping traffic.
+
+## Interoperability tests
+
+`test/Yamux.Interop.Tests` builds `benchmarks/go-interop` and verifies both
+directions, FIN/RST/GoAway handling, ping, multi-stream transfers, and custom
+windows (including a 4 MB transfer against a 1 MB Go receive window) against Go
+yamux v0.1.2:
+
+```bash
+dotnet test test/Yamux.Interop.Tests
+```

@@ -1,4 +1,5 @@
 ﻿using System.Buffers;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Threading.Channels;
 using Yamux.Protocol;
@@ -18,6 +19,8 @@ internal class SessionFrameWriter
 
     private readonly SemaphoreSlim _flushLock = new SemaphoreSlim(1, 1);
     private readonly Stack<WriteSegment> _segmentPool = new();
+    private readonly ConcurrentQueue<ResettableValueTaskSource> _sourcePool = new();
+    private byte[] _batchHeaderBuffer = new byte[4 * 1024];
 
     internal void SetMetrics(YamuxMetrics? metrics) => _metrics = metrics;
 
@@ -77,15 +80,15 @@ internal class SessionFrameWriter
                             seg1.SetNext(seg2);
                             var sequence = new ReadOnlySequence<byte>(seg1, 0, seg2, item.Frame.Payload.Length);
                             await _peer.WriteAsync(sequence, default).ConfigureAwait(false);
-                            _stats?.UpdateSent((uint)item.Frame.Payload.Length);
-                            _metrics?.BytesSent.Add(item.Frame.Payload.Length);
+                            _stats?.UpdateSent((ulong)item.Frame.Payload.Length);
+                            _metrics?.BytesSent(item.Frame.Payload.Length);
                         }
                         else
                         {
                             await _peer.WriteAsync(headerBuffer.AsMemory(0, FrameHeader.FrameHeaderSize), default).ConfigureAwait(false);
                         }
 
-                        _metrics?.FramesSent.Add(1);
+                        _metrics?.FrameSent();
                         item.Complete();
                     }
                     catch (OperationCanceledException cancelEx)
@@ -122,13 +125,18 @@ internal class SessionFrameWriter
                 List<WriteItem> batch = new();
                 WriteSegment? head = null, tail = null;
                 long runningIndex = 0;
+                long payloadBytes = 0;
                 int totalBytes = 0;
+                bool sawFlushMarker = false;
+                byte[] headerStorage = _batchHeaderBuffer;
+                int headerOffset = 0;
 
                 while (_writeQueue.Reader.TryRead(out var item))
                 {
                     if (item.IsFlushMarker)
                     {
                         batch.Add(item);
+                        sawFlushMarker = true;
                         break;
                     }
 
@@ -137,13 +145,22 @@ internal class SessionFrameWriter
                     if (Session.SessionTracer.Switch.ShouldTrace(TraceEventType.Verbose))
                         Session.SessionTracer.TraceEvent(TraceEventType.Verbose, 0, "[Dbg] yamux: writing frame - {0}, payload size = {1}", item.Frame.Header.FrameType, item.Frame.Header.Length);
 
-                    using var _ = item.Frame;
-                    var hdrBuf = ArrayPool<byte>.Shared.Rent(FrameHeader.FrameHeaderSize);
-                    item.Frame.Header.WriteTo(hdrBuf);
+                    // Reuse one header buffer per batch (and grow it if needed)
+                    // instead of renting a tiny array for every frame.
+                    if (headerOffset + FrameHeader.FrameHeaderSize > headerStorage.Length)
+                    {
+                        int newSize = Math.Max(headerStorage.Length * 2, headerOffset + FrameHeader.FrameHeaderSize);
+                        var newBuffer = new byte[newSize];
+                        Array.Copy(headerStorage, newBuffer, headerOffset);
+                        headerStorage = newBuffer;
+                        _batchHeaderBuffer = newBuffer;
+                    }
+
+                    item.Frame.Header.WriteTo(headerStorage.AsSpan(headerOffset, FrameHeader.FrameHeaderSize));
                     var hdrSeg = RentSegment();
-                    hdrSeg.Set(hdrBuf.AsMemory(0, FrameHeader.FrameHeaderSize), runningIndex);
-                    hdrSeg.HeaderBuffer = hdrBuf;
+                    hdrSeg.Set(headerStorage.AsMemory(headerOffset, FrameHeader.FrameHeaderSize), runningIndex);
                     AppendSegment(ref head, ref tail, hdrSeg);
+                    headerOffset += FrameHeader.FrameHeaderSize;
                     runningIndex += FrameHeader.FrameHeaderSize;
                     totalBytes += FrameHeader.FrameHeaderSize;
 
@@ -154,6 +171,7 @@ internal class SessionFrameWriter
                         AppendSegment(ref head, ref tail, paySeg);
                         runningIndex += item.Frame.Payload.Length;
                         totalBytes += item.Frame.Payload.Length;
+                        payloadBytes += item.Frame.Payload.Length;
                     }
 
                     if (totalBytes >= _minBatchSize)
@@ -167,8 +185,8 @@ internal class SessionFrameWriter
                     {
                         var sequence = new ReadOnlySequence<byte>(head, 0, tail!, tail!.Memory.Length);
                         await _peer.WriteAsync(sequence, default).ConfigureAwait(false);
-                        _stats?.UpdateSent((uint)runningIndex);
-                        _metrics?.BytesSent.Add(runningIndex);
+                        _stats?.UpdateSent((ulong)payloadBytes);
+                        _metrics?.BytesSent(payloadBytes);
                     }
                     catch (OperationCanceledException cancelEx)
                     {
@@ -187,6 +205,23 @@ internal class SessionFrameWriter
                         ReturnSegment(seg);
                 }
 
+                if (sawFlushMarker && batchError == null)
+                {
+                    try
+                    {
+                        // The flush marker is a barrier: honor the transport's
+                        // FlushAsync before completing it, even when no frames
+                        // were pending in this batch.
+                        await _peer.FlushAsync(default).ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        if (Session.SessionTracer.Switch.ShouldTrace(TraceEventType.Error))
+                            Session.SessionTracer.TraceEvent(TraceEventType.Error, 0, "[Err] yamux: error flushing transport - {0}", ex.Message);
+                        batchError = ex;
+                    }
+                }
+
                 foreach (var item in batch)
                 {
                     if (item.IsFlushMarker)
@@ -198,10 +233,24 @@ internal class SessionFrameWriter
                     }
                     else
                     {
-                        if (batchError != null)
-                            item.Fault(batchError);
-                        else
-                            item.Complete();
+                        try
+                        {
+                            if (batchError != null)
+                            {
+                                item.Fault(batchError);
+                            }
+                            else
+                            {
+                                _metrics?.FrameSent();
+                                item.Complete();
+                            }
+                        }
+                        finally
+                        {
+                            // Keep the frame (and any payload owner) alive until the
+                            // batched transport write has completed.
+                            item.Frame.Dispose();
+                        }
                     }
                 }
             }
@@ -218,25 +267,48 @@ internal class SessionFrameWriter
 
     public async ValueTask WriteAsync(Frame frame, CancellationToken cancellationToken)
     {
-        var source = new ResettableValueTaskSource();
+        var source = RentSource();
         var completionTask = source.GetValueTask();
         var item = new WriteItem(frame, source);
+        bool enqueued = false;
 
         if (Session.SessionTracer.Switch.ShouldTrace(TraceEventType.Verbose))
             Session.SessionTracer.TraceEvent(TraceEventType.Verbose, 0, "[Dbg] yamux: Enqueuing frame for write - {0}, payload size = {1}", frame.Header.FrameType, frame.Header.Length);
 
-        await _writeQueue.Writer.WriteAsync(item, cancellationToken)
-            .AsTask()
-            .WaitAsync(_connectionWriteTimeout, cancellationToken)
-            .ConfigureAwait(false);
+        try
+        {
+            // Fast path avoids allocating a task for the queue write.
+            if (_writeQueue.Writer.TryWrite(item))
+            {
+                enqueued = true;
+            }
+            else
+            {
+                await _writeQueue.Writer.WriteAsync(item, cancellationToken)
+                    .AsTask()
+                    .WaitAsync(_connectionWriteTimeout, cancellationToken)
+                    .ConfigureAwait(false);
+                enqueued = true;
+            }
 
-        if (Session.SessionTracer.Switch.ShouldTrace(TraceEventType.Verbose))
-            Session.SessionTracer.TraceEvent(TraceEventType.Verbose, 0, "[Dbg] yamux: Frame enqueued for write - {0}, payload size = {1}", frame.Header.FrameType, frame.Header.Length);
+            if (Session.SessionTracer.Switch.ShouldTrace(TraceEventType.Verbose))
+                Session.SessionTracer.TraceEvent(TraceEventType.Verbose, 0, "[Dbg] yamux: Frame enqueued for write - {0}, payload size = {1}", frame.Header.FrameType, frame.Header.Length);
 
-        await completionTask.ConfigureAwait(false);
+            await completionTask.ConfigureAwait(false);
 
-        if (Session.SessionTracer.Switch.ShouldTrace(TraceEventType.Verbose))
-            Session.SessionTracer.TraceEvent(TraceEventType.Verbose, 0, "[Dbg] yamux: Write completed for frame - {0}, payload size = {1}", frame.Header.FrameType, frame.Header.Length);
+            if (Session.SessionTracer.Switch.ShouldTrace(TraceEventType.Verbose))
+                Session.SessionTracer.TraceEvent(TraceEventType.Verbose, 0, "[Dbg] yamux: Write completed for frame - {0}, payload size = {1}", frame.Header.FrameType, frame.Header.Length);
+        }
+        finally
+        {
+            // The writer is done with the source once the completion task has
+            // completed (successfully or not). If enqueueing failed, the item may
+            // still be referenced by the queue, so let it be collected instead.
+            if (enqueued)
+            {
+                ReturnSource(source);
+            }
+        }
     }
 
     public void EnqueueFrame(Frame frame)
@@ -313,13 +385,24 @@ internal class SessionFrameWriter
 
     private void ReturnSegment(WriteSegment seg)
     {
-        if (seg.HeaderBuffer != null)
-        {
-            ArrayPool<byte>.Shared.Return(seg.HeaderBuffer);
-            seg.HeaderBuffer = null;
-        }
         seg.Reset();
         _segmentPool.Push(seg);
+    }
+
+    private ResettableValueTaskSource RentSource()
+    {
+        if (_sourcePool.TryDequeue(out var source))
+        {
+            source.Reset();
+            return source;
+        }
+
+        return new ResettableValueTaskSource();
+    }
+
+    private void ReturnSource(ResettableValueTaskSource source)
+    {
+        _sourcePool.Enqueue(source);
     }
 
     private static void AppendSegment(ref WriteSegment? head, ref WriteSegment? tail, WriteSegment seg)
@@ -344,14 +427,11 @@ internal class SessionFrameWriter
 
     private sealed class WriteSegment : ReadOnlySequenceSegment<byte>
     {
-        public byte[]? HeaderBuffer { get; set; }
-
         public WriteSegment Set(ReadOnlyMemory<byte> memory, long runningIndex)
         {
             Memory = memory;
             RunningIndex = runningIndex;
             Next = null;
-            HeaderBuffer = null;
             return this;
         }
 

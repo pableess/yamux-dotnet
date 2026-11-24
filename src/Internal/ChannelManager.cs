@@ -31,6 +31,8 @@ internal class ChannelManager
         {
             FullMode = BoundedChannelFullMode.Wait,
             SingleWriter = true,
+            // Session.AcceptAsync may be called concurrently by applications.
+            SingleReader = false,
         });
     }
 
@@ -51,7 +53,7 @@ internal class ChannelManager
             if (flags.HasFlag(Flags.SYN))
             {
                 Session.SessionTracer.TraceEvent(TraceEventType.Error, 0, $"[Err] yamux: duplicate stream declared: {id}");
-                await writer.WriteAsync(Frame.CreateWindowUpdateFrame(id, Flags.RST, 0), cancellationToken).ConfigureAwait(false);
+                writer.EnqueueFrame(Frame.CreateWindowUpdateFrame(id, Flags.RST, 0));
                 return null;
             }
             return channel;
@@ -70,20 +72,27 @@ internal class ChannelManager
 
             if (reject)
             {
-                await writer.WriteAsync(Frame.CreateWindowUpdateFrame(id, Flags.RST, 0), cancellationToken).ConfigureAwait(false);
+                writer.EnqueueFrame(Frame.CreateWindowUpdateFrame(id, Flags.RST, 0));
                 return null;
             }
 
             if (_channels.Count >= _maxChannels)
             {
-                await writer.WriteAsync(Frame.CreateWindowUpdateFrame(id, Flags.RST, 0), cancellationToken).ConfigureAwait(false);
+                writer.EnqueueFrame(Frame.CreateWindowUpdateFrame(id, Flags.RST, 0));
                 return null;
             }
 
             var newChannel = new SessionChannel(_adapter, id, _defaultOptions, ChannelRemoteState.Open);
             _channels.TryAdd(id, newChannel);
 
-            await _acceptQueue.Writer.WriteAsync(newChannel, cancellationToken).ConfigureAwait(false);
+            // Never block the frame reader on the accept backlog: if the
+            // application is not accepting, reset the stream (Go yamux does the same).
+            if (!_acceptQueue.Writer.TryWrite(newChannel))
+            {
+                _channels.TryRemove(id, out _);
+                writer.EnqueueFrame(Frame.CreateWindowUpdateFrame(id, Flags.RST, 0));
+                return null;
+            }
 
             return newChannel;
         }
@@ -94,7 +103,7 @@ internal class ChannelManager
     public SessionChannel AddChannel(uint id, SessionChannel channel)
     {
         _channels.TryAdd(id, channel);
-        _metrics?.ChannelsOpened.Add(1);
+        _metrics?.ChannelOpened();
         return channel;
     }
 
@@ -167,11 +176,29 @@ internal class ChannelManager
 
         foreach (var c in currentChannels)
         {
-            if (err == null)
-                c.Close();
-            else
-                c.Close(err);
-            _metrics?.ChannelsClosed.Add(1);
+            try
+            {
+                if (err == null)
+                    c.Close();
+                else
+                    c.Close(err);
+            }
+            catch (ObjectDisposedException)
+            {
+                // Already disposed by the application.
+            }
+            catch (Exception ex)
+            {
+                Session.SessionTracer.TraceInformation("[Warn] yamux: failed to close channel {0} - {1}", c.Id, ex.Message);
+            }
+            finally
+            {
+                // Release timers/statistics even if the channel was never disposed
+                // by the application.
+                try { c.Dispose(); } catch (Exception) { }
+            }
+
+            _metrics?.ChannelClosed();
         }
     }
 

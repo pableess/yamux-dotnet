@@ -38,21 +38,28 @@ internal class SessionChannel : IDuplexSessionChannel
 
     private RemoteDataWindow _remoteWindow;
 
-    private Lock _receiveWindowLock = new Lock();
-    private Lock _stateLock = new Lock();
+    private readonly Lock _receiveWindowLock = new();
+    private readonly Lock _stateLock = new();
+    private readonly SemaphoreSlim _writeGate = new(1, 1);
     private TaskCompletionSource _remoteCloseTask;
     private TaskCompletionSource _remoteAckTask;
     private CancellationTokenSource? _closeTimeoutCts;
     private uint _receiveWindowMax;
 
     private volatile bool _disposed;
+    private bool _writeClosing;
+    private bool _closeScheduled;
     private YamuxException? _fault;
     private ValueTask? _pendingPipeFlush;
 
     private ChannelLocalPhase _localPhase;
     private ChannelRemoteState _remoteState;
 
-    private long _timeSinceLastUpdate = Stopwatch.GetTimestamp();
+    private readonly bool _remoteInitiated;
+
+    private uint _advertisedWindowSize = Constants.Initial_Window_Size;
+    private long _receiveWindowRemaining = Constants.Initial_Window_Size;
+    private long _lastWindowUpdateTimestamp;
 
     public bool IsClosed
     {
@@ -84,7 +91,8 @@ internal class SessionChannel : IDuplexSessionChannel
         {
             lock (_stateLock)
             {
-                return _localPhase < ChannelLocalPhase.WriteClosed
+                return !_writeClosing
+                    && _localPhase < ChannelLocalPhase.WriteClosed
                     && _remoteState != ChannelRemoteState.Reset;
             }
         }
@@ -99,9 +107,10 @@ internal class SessionChannel : IDuplexSessionChannel
         _session = session;
         _channelOptions = defaultOptions;
         _remoteState = initialRemoteState;
+        _remoteInitiated = initialRemoteState == ChannelRemoteState.Open;
         _writeTimeout = session.StreamSendTimeout;
 
-        _inputBuffer = new Pipe(new PipeOptions(pauseWriterThreshold: _channelOptions.ReceiveWindowUpperBound + 1));
+        _inputBuffer = new Pipe(new PipeOptions(pauseWriterThreshold: (long)_channelOptions.ReceiveWindowUpperBound + 1));
 
         _remoteCloseTask = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         _remoteAckTask = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -111,13 +120,13 @@ internal class SessionChannel : IDuplexSessionChannel
         _input = new CountingPipeReader(_inputBuffer.Reader, OnInputBytesConsumed);
 
         _receiveWindowMax = _channelOptions.ReceiveWindowSize;
+        _advertisedWindowSize = Constants.Initial_Window_Size;
+        _receiveWindowRemaining = Constants.Initial_Window_Size;
 
         if (_channelOptions.EnableStatistics)
         {
             this.Stats = new Statistics(_channelOptions.StatisticsSampleInterval, default);
         }
-
-        ApplyWindowSizeChange(Constants.Initial_Window_Size);
     }
 
     internal void Close(SessionException ex)
@@ -155,15 +164,44 @@ internal class SessionChannel : IDuplexSessionChannel
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        var writeClosedToken = _writeClosedCancellation.Token;
+        if (_disposed)
+        {
+            throw new SessionChannelException(ChannelErrorCode.ChannelClosed, "Channel has been closed.");
+        }
 
-        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, writeClosedToken);
-        var linkedToken = linkedCts.Token;
+        CancellationToken writeClosedToken;
+        try
+        {
+            writeClosedToken = _writeClosedCancellation.Token;
+        }
+        catch (ObjectDisposedException ex)
+        {
+            throw new SessionChannelException(ChannelErrorCode.ChannelClosed, "Channel has been closed.", ex);
+        }
 
-        this.ValidateStateForWrite();
+        CancellationTokenSource? linkedCts = null;
+        CancellationToken linkedToken;
+        if (cancellationToken.CanBeCanceled)
+        {
+            linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, writeClosedToken);
+            linkedToken = linkedCts.Token;
+        }
+        else
+        {
+            linkedToken = writeClosedToken;
+        }
+
+        bool gateAcquired = false;
 
         try
         {
+            // Serialize writes so that a FIN cannot be enqueued between two data
+            // frames of the same logical write. The gate is also used by CloseWrite.
+            await _writeGate.WaitAsync(linkedToken).ConfigureAwait(false);
+            gateAcquired = true;
+
+            this.ValidateStateForWrite();
+
             for (uint i = 0; i < buffer.Length;)
             {
                 uint requested = (uint)Math.Min(_channelOptions.MaxDataFrameSize, buffer.Length - i);
@@ -183,7 +221,7 @@ internal class SessionChannel : IDuplexSessionChannel
                     Session.SessionTracer.TraceEvent(TraceEventType.Verbose, 0, $"[Dbg] yamux: Channel {Id} sending data frame (size: {slice.Length})");
                 await _session.SendFrameAsync(dataFrame, linkedToken);
 
-                Stats?.UpdateSent((ulong)slice.Length);
+                RecordSentBytes((ulong)slice.Length);
 
                 i += available;
             }
@@ -216,6 +254,15 @@ internal class SessionChannel : IDuplexSessionChannel
                 Session.SessionTracer.TraceEvent(TraceEventType.Warning, 0, $"[Warn] yamux: Channel {Id} write timeout: {ex.Message}");
             throw new TimeoutException("Timeout waiting for write access to channel", ex);
         }
+        finally
+        {
+            if (gateAcquired)
+            {
+                _writeGate.Release();
+            }
+
+            linkedCts?.Dispose();
+        }
     }
 
     public ValueTask FlushWritesAsync(CancellationToken cancellationToken = default)
@@ -228,7 +275,8 @@ internal class SessionChannel : IDuplexSessionChannel
         if (_disposed)
             return;
 
-        _writeClosedCancellation.Cancel();
+        try { _writeClosedCancellation.Cancel(); }
+        catch (ObjectDisposedException) { }
 
         lock (_stateLock)
         {
@@ -244,13 +292,25 @@ internal class SessionChannel : IDuplexSessionChannel
 
     public void Close()
     {
-        this.ThrowIfDisposed();
+        // Closing a channel that was already disposed (for example because the
+        // session closed concurrently) is a no-op rather than an error.
+        if (_disposed)
+        {
+            return;
+        }
+
         this.CloseWrite();
     }
 
     public async Task<bool> WhenRemoteCloseAsync(TimeSpan timeout)
     {
-        this.ThrowIfDisposed();
+        // Do not throw if the channel was disposed: disposal completes the
+        // remote-close task, so the caller can still observe that the channel
+        // is closed.
+        if (_remoteCloseTask.Task.IsCompleted)
+        {
+            return true;
+        }
 
         var task = await Task.WhenAny(_remoteCloseTask.Task, Task.Delay(timeout));
         return task == _remoteCloseTask.Task;
@@ -258,7 +318,18 @@ internal class SessionChannel : IDuplexSessionChannel
 
     public async Task<bool> WhenRemoteAckAsync(TimeSpan timeout)
     {
-        this.ThrowIfDisposed();
+        if (_remoteAckTask.Task.IsCompleted)
+        {
+            return true;
+        }
+
+        // A disposed channel that was never acknowledged will never be
+        // acknowledged; report that instead of throwing ObjectDisposedException.
+        if (_disposed)
+        {
+            return false;
+        }
+
         var task = await Task.WhenAny(_remoteAckTask.Task, Task.Delay(timeout));
         return task == _remoteAckTask.Task;
     }
@@ -275,6 +346,12 @@ internal class SessionChannel : IDuplexSessionChannel
 
                 CancelCloseTimeout();
 
+                // A fully and gracefully closed channel (FIN sent and FIN received)
+                // does not need a RST on disposal.
+                bool graceful = _remoteState >= ChannelRemoteState.ReadClosed
+                    && _localPhase >= ChannelLocalPhase.WriteClosed;
+                bool sendReset = !graceful && _remoteState != ChannelRemoteState.Reset;
+
                 if (_remoteState < ChannelRemoteState.ReadClosed)
                 {
                     _localPhase = ChannelLocalPhase.WriteClosed;
@@ -283,10 +360,14 @@ internal class SessionChannel : IDuplexSessionChannel
                     _remoteCloseTask.TrySetResult();
                 }
 
-                this.SendWindowUpdate(0, (Flags)Flags.RST);
+                if (sendReset)
+                {
+                    this.SendWindowUpdate(0, (Flags)Flags.RST);
+                }
 
                 this._session.ChannelDisconnect(this);
 
+                _remoteWindow.Dispose();
                 _writeClosedCancellation.Dispose();
                 Stats?.Dispose();
                 Stats = null;
@@ -304,16 +385,30 @@ internal class SessionChannel : IDuplexSessionChannel
     {
         lock (_stateLock)
         {
-            if (_localPhase == ChannelLocalPhase.None && _remoteState >= ChannelRemoteState.Open)
+            // A FIN can legitimately arrive before the application accepts the
+            // channel (the peer opened and half-closed immediately). Only a reset
+            // channel is not acceptable.
+            bool canAccept = _localPhase == ChannelLocalPhase.None
+                && (_remoteState == ChannelRemoteState.Open || _remoteState == ChannelRemoteState.ReadClosed);
+
+            if (canAccept)
             {
-                _localPhase = ChannelLocalPhase.SynSent;
-                this.SendWindowUpdate(0, Flags.ACK);
+                // Sending the ACK also carries the initial window increase. This is
+                // the only place a remotely initiated channel advertises its window;
+                // the constructor must not send frames for a stream the peer opened.
+                _localPhase = ChannelLocalPhase.Established;
+                var delta = _channelOptions.ReceiveWindowSize > _advertisedWindowSize
+                    ? _channelOptions.ReceiveWindowSize - _advertisedWindowSize
+                    : 0;
+                _advertisedWindowSize = _channelOptions.ReceiveWindowSize;
+                _receiveWindowMax = _channelOptions.ReceiveWindowSize;
+                this.SendWindowUpdate(delta, Flags.ACK);
             }
             else
             {
                 throw new SessionChannelException(
-                    _localPhase >= ChannelLocalPhase.WriteClosed || _remoteState >= ChannelRemoteState.ReadClosed
-                        ? ChannelErrorCode.ChannelClosed
+                    _remoteState == ChannelRemoteState.Reset
+                        ? ChannelErrorCode.ChannelRejected
                         : ChannelErrorCode.InvalidChannelState,
                     $"Channel {Id} cannot be accepted in local={_localPhase} remote={_remoteState} state");
             }
@@ -342,8 +437,45 @@ internal class SessionChannel : IDuplexSessionChannel
         }
     }
 
-    internal async Task ApplyOptionsAsync(SessionChannelOptions options, CancellationToken cancel)
+    /// <summary>
+    /// Sends the SYN frame for a locally initiated channel, carrying the initial
+    /// window increase in the same frame so the peer sees a single SYN. The write
+    /// is awaited so a following data frame can never overtake the SYN.
+    /// </summary>
+    internal async ValueTask SendInitialWindowUpdateAsync(CancellationToken cancellationToken)
     {
+        Flags flags;
+        uint delta;
+
+        lock (_stateLock)
+        {
+            if (_localPhase != ChannelLocalPhase.None)
+            {
+                return;
+            }
+
+            delta = _channelOptions.ReceiveWindowSize > _advertisedWindowSize
+                ? _channelOptions.ReceiveWindowSize - _advertisedWindowSize
+                : 0;
+            _advertisedWindowSize = _channelOptions.ReceiveWindowSize;
+            _receiveWindowMax = _channelOptions.ReceiveWindowSize;
+
+            // GetSendFlags sets SYN and transitions to SynSent.
+            flags = GetSendFlags();
+
+            if (delta > 0)
+            {
+                Interlocked.Add(ref _receiveWindowRemaining, delta);
+            }
+        }
+
+        var frame = Frame.CreateWindowUpdateFrame(Id, flags, delta);
+        await _session.SendFrameAsync(frame, cancellationToken).ConfigureAwait(false);
+    }
+
+    internal ValueTask ApplyOptionsAsync(SessionChannelOptions options, CancellationToken cancel)
+    {
+        cancel.ThrowIfCancellationRequested();
         options.Validate();
 
         if (options.ReceiveWindowSize < _channelOptions.ReceiveWindowSize)
@@ -353,51 +485,170 @@ internal class SessionChannel : IDuplexSessionChannel
 
         _channelOptions = options;
 
-        if (_channelOptions.ReceiveWindowUpperBound != options.ReceiveWindowUpperBound)
+        // The receive window can only grow after the channel is created. The input
+        // pipe's pause threshold is fixed at construction; changing it after data
+        // may already be buffered would require coordinating with the read loop.
+        ApplyWindowIncrease(options.ReceiveWindowSize);
+
+        return ValueTask.CompletedTask;
+    }
+
+    private void ApplyWindowIncrease(uint desiredWindowSize)
+    {
+        lock (_receiveWindowLock)
         {
-            var oldPipe = _inputBuffer;
-
-            _inputBuffer = new Pipe(new PipeOptions(pauseWriterThreshold: _channelOptions.ReceiveWindowUpperBound + 1));
-
-            var copied = await CopyToAsync(oldPipe.Reader, _inputBuffer.Writer, cancel);
-
-            _input = new CountingPipeReader(_inputBuffer.Reader, OnInputBytesConsumed);
-
-            if (Stats == null && _channelOptions.EnableStatistics)
+            if (desiredWindowSize <= _advertisedWindowSize)
             {
-                Stats = new Statistics(_channelOptions.StatisticsSampleInterval, default);
-                Stats.UpdateReceived(copied);
+                return;
             }
+
+            var difference = desiredWindowSize - _advertisedWindowSize;
+            _advertisedWindowSize = desiredWindowSize;
+            _receiveWindowMax = desiredWindowSize;
+            this.SendWindowUpdate(difference);
+        }
+    }
+
+    internal bool TryConsumeReceiveWindow(uint length)
+    {
+        if (length == 0)
+        {
+            return true;
         }
 
-        ApplyWindowSizeChange(Constants.Initial_Window_Size);
+        var remaining = Interlocked.Add(ref _receiveWindowRemaining, -(long)length);
+        if (remaining < 0)
+        {
+            // Roll the reservation back; the caller will treat this as a protocol error.
+            Interlocked.Add(ref _receiveWindowRemaining, length);
+            return false;
+        }
+
+        return true;
+    }
+
+    internal bool IsReset
+    {
+        get
+        {
+            lock (_stateLock)
+            {
+                return _remoteState == ChannelRemoteState.Reset;
+            }
+        }
+    }
+
+    internal void RecordSentBytes(ulong bytes)
+    {
+        var stats = Stats;
+        if (stats is null)
+        {
+            return;
+        }
+
+        try
+        {
+            stats.UpdateSent(bytes);
+        }
+        catch (ObjectDisposedException)
+        {
+            // Statistics are best effort; disposal can race with an in-flight write.
+        }
+    }
+
+    internal void RecordReceivedBytes(ulong bytes)
+    {
+        var stats = Stats;
+        if (stats is null)
+        {
+            return;
+        }
+
+        try
+        {
+            stats.UpdateReceived(bytes);
+        }
+        catch (ObjectDisposedException)
+        {
+            // Statistics are best effort; disposal can race with the read loop.
+        }
     }
 
     internal void CloseWrite()
     {
         lock (_stateLock)
         {
-            if (_localPhase >= ChannelLocalPhase.WriteClosed)
+            if (_localPhase >= ChannelLocalPhase.WriteClosed || _writeClosing || _closeScheduled)
             {
                 return;
             }
 
-            _localPhase = ChannelLocalPhase.WriteClosed;
-            this.SendWindowUpdate(0);
+            _writeClosing = true;
+            _closeScheduled = true;
         }
 
-        var closeTimeout = _session.StreamCloseTimeout;
-        if (closeTimeout > TimeSpan.Zero)
+        // Wake any write blocked on window credit so the write gate is released
+        // and the FIN can be ordered after the data that was already sent.
+        try { _writeClosedCancellation.Cancel(); }
+        catch (ObjectDisposedException) { }
+
+        _ = SendCloseAsync();
+    }
+
+    private async Task SendCloseAsync()
+    {
+        try
         {
-            lock (_stateLock)
+            // Wait for any in-flight write to finish so FIN is never enqueued
+            // between two data frames of the same write.
+            await _writeGate.WaitAsync().ConfigureAwait(false);
+            try
             {
-                if (_remoteState < ChannelRemoteState.ReadClosed)
+                Flags closeFlags;
+                lock (_stateLock)
                 {
-                    _closeTimeoutCts = new CancellationTokenSource();
-                    var cts = _closeTimeoutCts;
-                    _ = CloseTimeoutAsync(closeTimeout, cts);
+                    if (_disposed || _localPhase >= ChannelLocalPhase.WriteClosed)
+                    {
+                        return;
+                    }
+
+                    closeFlags = GetSendFlags() | Flags.FIN;
+                    _localPhase = ChannelLocalPhase.WriteClosed;
                 }
+
+                this.SendWindowUpdate(0, closeFlags);
             }
+            finally
+            {
+                _writeGate.Release();
+            }
+
+            StartCloseTimeout();
+        }
+        catch (Exception ex)
+        {
+            if (ChannelTracer.Switch.ShouldTrace(TraceEventType.Error))
+                ChannelTracer.TraceEvent(TraceEventType.Error, 0, $"[Err] yamux: failed to close channel {Id}: {ex.Message}");
+        }
+    }
+
+    private void StartCloseTimeout()
+    {
+        var closeTimeout = _session.StreamCloseTimeout;
+        if (closeTimeout <= TimeSpan.Zero)
+        {
+            return;
+        }
+
+        lock (_stateLock)
+        {
+            if (_disposed || _remoteState >= ChannelRemoteState.ReadClosed || _closeTimeoutCts != null)
+            {
+                return;
+            }
+
+            _closeTimeoutCts = new CancellationTokenSource();
+            _ = CloseTimeoutAsync(closeTimeout, _closeTimeoutCts);
         }
     }
 
@@ -419,6 +670,7 @@ internal class SessionChannel : IDuplexSessionChannel
             if (_disposed || _remoteState >= ChannelRemoteState.ReadClosed)
                 return;
 
+            _writeClosing = true;
             _localPhase = ChannelLocalPhase.WriteClosed;
             _remoteState = ChannelRemoteState.Reset;
 
@@ -442,39 +694,28 @@ internal class SessionChannel : IDuplexSessionChannel
         }
     }
 
-    private void ApplyWindowSizeChange(uint previousWindowSize)
-    {
-        if (_channelOptions.ReceiveWindowSize != previousWindowSize)
-        {
-            lock (_receiveWindowLock)
-            {
-                var difference = _channelOptions.ReceiveWindowSize - previousWindowSize;
-
-                _receiveWindowMax = _channelOptions.ReceiveWindowSize;
-
-                this.SendWindowUpdate(difference);
-            }
-        }
-    }
-
     private Flags GetSendFlags()
     {
         lock (_stateLock)
         {
-            var flags = Flags.None;
-            switch (_localPhase)
+            // FIN is deliberately not derived from the state here: it must be
+            // sent exactly once by the close path. Emitting it from every later
+            // window update causes the peer to see duplicate FINs.
+            if (_localPhase == ChannelLocalPhase.None)
             {
-                case ChannelLocalPhase.None:
-                    flags |= Flags.SYN;
-                    _localPhase = ChannelLocalPhase.SynSent;
-                    break;
-                case ChannelLocalPhase.SynSent:
-                    break;
-                case ChannelLocalPhase.WriteClosed:
-                    flags |= Flags.FIN;
-                    break;
+                if (_remoteInitiated)
+                {
+                    // The peer opened this stream; the first frame we send must
+                    // acknowledge it rather than declaring a duplicate SYN.
+                    _localPhase = ChannelLocalPhase.Established;
+                    return Flags.ACK;
+                }
+
+                _localPhase = ChannelLocalPhase.SynSent;
+                return Flags.SYN;
             }
-            return flags;
+
+            return Flags.None;
         }
     }
 
@@ -519,6 +760,7 @@ internal class SessionChannel : IDuplexSessionChannel
             {
                 CancelCloseTimeout();
                 _fault = new SessionChannelException(ChannelErrorCode.ChannelRejected, "Channel was rejected or forcibly closed by the remote peer");
+                _writeClosing = true;
                 _remoteState = ChannelRemoteState.Reset;
                 _localPhase = ChannelLocalPhase.WriteClosed;
                 _writeClosedCancellation.Cancel();
@@ -579,39 +821,46 @@ internal class SessionChannel : IDuplexSessionChannel
 
     private void OnInputBytesConsumed()
     {
+        if (_disposed)
+        {
+            return;
+        }
+
         lock (_receiveWindowLock)
         {
             uint increase = 0;
             var rtt = _session.RTT;
+            var now = Stopwatch.GetTimestamp();
+            var last = _lastWindowUpdateTimestamp;
+            var elapsed = last == 0 ? TimeSpan.MaxValue : Stopwatch.GetElapsedTime(last, now);
 
-            if (_channelOptions.AutoTuneReceiveWindowSize
-                && rtt.HasValue
-                && _timeSinceLastUpdate > 0
-                && _timeSinceLastUpdate < rtt.Value.Ticks * 2)
+            if (_channelOptions.AutoTuneReceiveWindowSize && rtt.HasValue)
             {
-                var previousMax = _receiveWindowMax;
-                _receiveWindowMax = Math.Min(_receiveWindowMax * 2, _channelOptions.ReceiveWindowUpperBound);
-
-                if (ChannelTracer.Switch.ShouldTrace(TraceEventType.Verbose))
-                    ChannelTracer.TraceEvent(TraceEventType.Verbose, 0, $"[Dbg] yamux: Channel {Id} auto-tune window increase max window size to {_receiveWindowMax} ");
-                increase = _receiveWindowMax - previousMax;
-            }
-            else if (_channelOptions.AutoTuneReceiveWindowSize
-                && rtt.HasValue
-                && _timeSinceLastUpdate > rtt.Value.Ticks * 4)
-            {
-                var halved = Math.Max(_receiveWindowMax / 2, _channelOptions.ReceiveWindowSize);
-                if (halved < _receiveWindowMax)
+                if (elapsed < rtt.Value * 2)
                 {
-                    _receiveWindowMax = halved;
+                    var previousMax = _receiveWindowMax;
+                    var doubled = Math.Min((ulong)_receiveWindowMax * 2, _channelOptions.ReceiveWindowUpperBound);
+                    _receiveWindowMax = (uint)doubled;
+
                     if (ChannelTracer.Switch.ShouldTrace(TraceEventType.Verbose))
-                        ChannelTracer.TraceEvent(TraceEventType.Verbose, 0, $"[Dbg] yamux: Channel {Id} auto-tune window decreased max window size to {_receiveWindowMax} ");
+                        ChannelTracer.TraceEvent(TraceEventType.Verbose, 0, $"[Dbg] yamux: Channel {Id} auto-tune window increase max window size to {_receiveWindowMax} ");
+                    increase = _receiveWindowMax - previousMax;
+                }
+                else if (elapsed > rtt.Value * 4)
+                {
+                    var halved = Math.Max(_receiveWindowMax / 2, _channelOptions.ReceiveWindowSize);
+                    if (halved < _receiveWindowMax)
+                    {
+                        _receiveWindowMax = halved;
+                        if (ChannelTracer.Switch.ShouldTrace(TraceEventType.Verbose))
+                            ChannelTracer.TraceEvent(TraceEventType.Verbose, 0, $"[Dbg] yamux: Channel {Id} auto-tune window decreased max window size to {_receiveWindowMax} ");
+                    }
                 }
             }
 
             if (_input.ConsumedBytes > (_receiveWindowMax / 2))
             {
-                _timeSinceLastUpdate = Stopwatch.GetTimestamp() - _timeSinceLastUpdate;
+                _lastWindowUpdateTimestamp = now;
                 if (ChannelTracer.Switch.ShouldTrace(TraceEventType.Verbose))
                     ChannelTracer.TraceEvent(TraceEventType.Verbose, 0, $"[Dbg] yamux: Channel {Id} sending window update (consumed: {_input.ConsumedBytes}, increase: {increase})");
                 this.SendWindowUpdate(_input.ConsumedBytes + increase);
@@ -620,7 +869,7 @@ internal class SessionChannel : IDuplexSessionChannel
             }
             else if (increase > 0)
             {
-                _timeSinceLastUpdate = Stopwatch.GetTimestamp() - _timeSinceLastUpdate;
+                _lastWindowUpdateTimestamp = now;
                 if (ChannelTracer.Switch.ShouldTrace(TraceEventType.Verbose))
                     ChannelTracer.TraceEvent(TraceEventType.Verbose, 0, $"[Dbg] yamux: Channel {Id} sending window update (increase only: {increase})");
                 this.SendWindowUpdate(increase);
@@ -630,6 +879,13 @@ internal class SessionChannel : IDuplexSessionChannel
 
     internal void SendWindowUpdate(uint incrementWindow, Flags? flags = null)
     {
+        if (incrementWindow > 0)
+        {
+            // Track how much credit we have granted the peer so incoming frames can
+            // be validated against the advertised receive window.
+            Interlocked.Add(ref _receiveWindowRemaining, incrementWindow);
+        }
+
         if (Session.SessionTracer.Switch.ShouldTrace(TraceEventType.Verbose))
             Session.SessionTracer.TraceEvent(TraceEventType.Verbose, 0, $"[Dbg] yamux: Channel {Id} sending window update (increment: {incrementWindow})");
         var update = Frame.CreateWindowUpdateFrame(this.Id, flags ?? GetSendFlags(), incrementWindow);
@@ -644,7 +900,7 @@ internal class SessionChannel : IDuplexSessionChannel
         {
             lock (_stateLock)
             {
-                if (_localPhase >= ChannelLocalPhase.WriteClosed || _writeClosedCancellation.IsCancellationRequested)
+                if (_writeClosing || _localPhase >= ChannelLocalPhase.WriteClosed || _writeClosedCancellation.IsCancellationRequested)
                 {
                     throw new SessionChannelException(ChannelErrorCode.ChannelWriteClosed, "SessionChannel half closed and can no longer send data");
                 }
@@ -656,36 +912,6 @@ internal class SessionChannel : IDuplexSessionChannel
         {
             throw _fault;
         }
-    }
-
-    private async ValueTask<ulong> CopyToAsync(PipeReader source, PipeWriter destination, CancellationToken cancellationToken = default)
-    {
-        ulong totalBytesCopied = 0;
-
-        while (true)
-        {
-            ReadResult result = await source.ReadAsync(cancellationToken).ConfigureAwait(false);
-            ReadOnlySequence<byte> buffer = result.Buffer;
-
-            if (buffer.Length > 0)
-            {
-                foreach (var segment in buffer)
-                {
-                    await destination.WriteAsync(segment, cancellationToken).ConfigureAwait(false);
-                    totalBytesCopied += (ulong)segment.Length;
-                }
-            }
-
-            source.AdvanceTo(buffer.End);
-
-            if (result.IsCompleted)
-            {
-                break;
-            }
-        }
-        await source.CompleteAsync().ConfigureAwait(false);
-
-        return totalBytesCopied;
     }
 
     private void ThrowIfDisposed()

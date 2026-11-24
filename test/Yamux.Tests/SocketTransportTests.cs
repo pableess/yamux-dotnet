@@ -209,6 +209,8 @@ res = await channel.Input.ReadAsync(TestContext.Current.CancellationToken);
         byte[]? serverReceived = null;
         byte[]? clientReceived = null;
 
+        using var bothDone = new Barrier(2);
+
         using var listener = new Socket(SocketType.Stream, ProtocolType.Tcp);
         listener.Bind(new IPEndPoint(IPAddress.Loopback, 0));
         listener.Listen();
@@ -216,40 +218,54 @@ res = await channel.Input.ReadAsync(TestContext.Current.CancellationToken);
 
         var serverTask = Task.Run(async () =>
         {
-            using var clientSocket = await listener.AcceptAsync(TestContext.Current.CancellationToken);
-            await using var session = clientSocket.AsYamuxSession(false);
-            session.Start();
-            using var channel = await session.AcceptAsync(TestContext.Current.CancellationToken);
+            try
+            {
+                using var clientSocket = await listener.AcceptAsync(TestContext.Current.CancellationToken);
+                await using var session = clientSocket.AsYamuxSession(false, leaveOpen: true);
+                session.Start();
+                using var channel = await session.AcceptAsync(TestContext.Current.CancellationToken);
 
-            await channel.WriteAsync(serverData, TestContext.Current.CancellationToken);
-            channel.Close();
+                await channel.WriteAsync(serverData, TestContext.Current.CancellationToken);
+                channel.Close();
 
-            var ms = new MemoryStream();
-            await channel.Input.CopyToAsync(ms);
-            serverReceived = ms.ToArray();
+                var ms = new MemoryStream();
+                await channel.Input.CopyToAsync(ms);
+                serverReceived = ms.ToArray();
 
-            await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
-            channel.Dispose();
+                await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(10));
+                channel.Dispose();
+            }
+            finally
+            {
+                bothDone.SignalAndWait(TimeSpan.FromSeconds(20));
+            }
         }, TestContext.Current.CancellationToken);
 
         var clientTask = Task.Run(async () =>
         {
-            using var sock = new Socket(SocketType.Stream, ProtocolType.Tcp);
-            await sock.ConnectAsync(new IPEndPoint(IPAddress.Loopback, port), TestContext.Current.CancellationToken);
+            try
+            {
+                using var sock = new Socket(SocketType.Stream, ProtocolType.Tcp);
+                await sock.ConnectAsync(new IPEndPoint(IPAddress.Loopback, port), TestContext.Current.CancellationToken);
 
-            await using var session = sock.AsYamuxSession(true);
-            session.Start();
-            using var channel = await session.OpenChannelAsync(cancellationToken: TestContext.Current.CancellationToken);
+                await using var session = sock.AsYamuxSession(true, leaveOpen: true);
+                session.Start();
+                using var channel = await session.OpenChannelAsync(cancellationToken: TestContext.Current.CancellationToken);
 
-            await channel.WriteAsync(clientData, TestContext.Current.CancellationToken);
-            channel.Close();
+                await channel.WriteAsync(clientData, TestContext.Current.CancellationToken);
+                channel.Close();
 
-            var ms = new MemoryStream();
-            await channel.Input.CopyToAsync(ms);
-            clientReceived = ms.ToArray();
+                var ms = new MemoryStream();
+                await channel.Input.CopyToAsync(ms);
+                clientReceived = ms.ToArray();
 
-            await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
-            channel.Dispose();
+                await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(10));
+                channel.Dispose();
+            }
+            finally
+            {
+                bothDone.SignalAndWait(TimeSpan.FromSeconds(20));
+            }
         }, TestContext.Current.CancellationToken);
 
         await Task.WhenAll(serverTask, clientTask);

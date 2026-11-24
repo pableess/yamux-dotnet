@@ -6,7 +6,8 @@
 public class SessionOptions
 {
     /// <summary>
-    /// The maximum number of channels that can be queued for acceptance before backpressure is applied.
+    /// The maximum number of incoming channels that can be queued for acceptance.
+    /// When the backlog or <see cref="MaxChannels"/> limit is exceeded, new streams are reset.
     /// </summary>
     public int AcceptBacklog { get; set; } = 256;
 
@@ -36,32 +37,27 @@ public class SessionOptions
     public TimeSpan StreamSendTimeout { get; set; } = TimeSpan.FromSeconds(75);
 
     /// <summary>
-    /// The maximum time to wait for a stream to be acknowledged after opening with SYN.
-    /// After this timeout, the session is closed. A zero value disables the timeout.
-    /// Matches the Go yamux <c>StreamOpenTimeout</c>.
+    /// The maximum time to wait for a stream to be acknowledged after opening with SYN
+    /// when <c>waitForAcknowledgement</c> is true. After this timeout, the session is closed.
+    /// A zero value disables the timeout. Matches the Go yamux <c>StreamOpenTimeout</c>.
     /// </summary>
     public TimeSpan StreamOpenTimeout { get; set; } = TimeSpan.FromSeconds(75);
 
     /// <summary>
-    /// The maximum time to wait for a write to the underlying connection to complete.
-    /// Acts as a safety valve after which the connection is suspected to be dead.
+    /// The maximum time to wait to enqueue a frame when the write queue is full,
+    /// and the timeout for ping responses. Acts as a safety valve after which the
+    /// connection is suspected to be dead.
     /// Matches the Go yamux <c>ConnectionWriteTimeout</c>.
     /// </summary>
     public TimeSpan ConnectionWriteTimeout { get; set; } = TimeSpan.FromSeconds(10);
 
     /// <summary>
-    /// The maximum time to wait for open channels to drain during session shutdown.
-    /// After this timeout, channels are forcefully closed.
+    /// The maximum time to wait for the frame reader to stop during session shutdown.
     /// </summary>
     public TimeSpan SessionCloseTimeout { get; set; } = TimeSpan.FromSeconds(30);
 
     /// <summary>
-    /// The timeout for reading data from the underlying transport.
-    /// </summary>
-    public TimeSpan ReadTimeout { get; set; } = TimeSpan.FromMinutes(5);
-
-    /// <summary>
-    /// Default channel options applied to newly accepted channels.
+    /// Default channel options used for newly opened channels and applied to accepted channels.
     /// </summary>
     public SessionChannelOptions DefaultChannelOptions { get; set; } = new SessionChannelOptions();
 
@@ -91,17 +87,12 @@ public class SessionOptions
     public bool EnableMetrics { get; set; } = true;
 
     /// <summary>
-    /// Overrides the transport's default of mode of the writer accumulates multiple frames into a single Write call
-    /// The transport must support the <see cref="ITransport.WriteAsync(System.Buffers.ReadOnlySequence{byte}, System.Threading.CancellationToken)"/> overload for this to be effective.
-    /// This would only be useful if the transport is capable of scatter/gather writes (e.g., <c>SocketAsyncEventArgs.BufferList</c>).
-    /// <see cref="System.Buffers.ReadOnlySequence{T}"/> and writes them to the transport
-    /// in one call via <see cref="ITransport.WriteAsync(System.Buffers.ReadOnlySequence{byte}, System.Threading.CancellationToken)"/>.
-    /// To realize throughput gains, the transport must implement that overload
-    /// efficiently (e.g., scatter/gather via <c>SocketAsyncEventArgs.BufferList</c>).
-    /// When disabled, each frame component (header, payload) is written individually
-    /// via <see cref="ITransport.WriteAsync(System.ReadOnlyMemory{byte}, System.Threading.CancellationToken)"/>.
-    /// Only frames already queued in the write channel at the same time are batched together.
-    /// Default is <c>false</c>.
+    /// Overrides the transport's batching mode. When <c>null</c>, the value of
+    /// <see cref="ITransport.SupportsBatching"/> is used. When enabled, queued frames
+    /// are written to the transport with
+    /// <see cref="ITransport.WriteAsync(System.Buffers.ReadOnlySequence{byte}, System.Threading.CancellationToken)"/>.
+    /// Only frames already queued at the same time are batched together.
+    /// Default is <c>null</c>.
     /// </summary>
     public bool? WriteSegmentBatchingEnabled { get; set; }
 

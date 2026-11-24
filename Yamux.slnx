@@ -16,6 +16,7 @@
     <File Path="README.md" />
   </Folder>
   <Folder Name="/test/">
+    <Project Path="test/Yamux.Interop.Tests/Yamux.Interop.Tests.csproj" />
     <Project Path="test/Yamux.Tests/Yamux.Tests.csproj" />
   </Folder>
   <Project Path="src/Yamux.csproj" />

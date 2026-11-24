@@ -11,6 +11,7 @@ public class PipePeer : ITransport
 {
     private readonly PipeReader _reader;
     private readonly PipeWriter _writer;
+    private int _completed;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="PipePeer"/> class.
@@ -106,14 +107,23 @@ public class PipePeer : ITransport
     /// <inheritdoc />
     public void Close()
     {
-        _reader.Complete();
-        _writer.Complete();
+        Complete();
     }
 
     /// <inheritdoc />
     public void Dispose()
     {
-        _reader.Complete();
-        _writer.Complete();
+        Complete();
+    }
+
+    private void Complete()
+    {
+        if (Interlocked.Exchange(ref _completed, 1) != 0)
+        {
+            return;
+        }
+
+        try { _reader.Complete(); } catch (InvalidOperationException) { }
+        try { _writer.Complete(); } catch (InvalidOperationException) { }
     }
 }

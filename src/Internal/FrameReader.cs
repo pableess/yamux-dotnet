@@ -85,7 +85,7 @@ internal class FrameReader
         {
             await foreach (var frameHeader in _reader.ReadFramesAsync(_readToken.Token))
             {
-                _metrics?.FramesReceived.Add(1);
+                _metrics?.FrameReceived();
 
                 switch (frameHeader.FrameType)
                 {
@@ -111,7 +111,7 @@ internal class FrameReader
             if (!_isStopping)
             {
                 Session.SessionTracer.TraceInformation("[Err]: Session receive loop faulted");
-                _metrics?.SessionErrors.Add(1);
+                _metrics?.SessionError();
                 _ = Task.Run(() => _onFault(ex));
             }
         }
@@ -140,53 +140,54 @@ internal class FrameReader
         {
             Session.SessionTracer.TraceInformation("[WARN] yamux: discarding data frame for unknown stream {0}, sending RST", frameHeader.StreamId);
 
-            _ = _writer.WriteAsync(
-                Frame.CreateWindowUpdateFrame(frameHeader.StreamId, Flags.RST, 0),
-                CancellationToken.None);
+            _writer.EnqueueFrame(Frame.CreateWindowUpdateFrame(frameHeader.StreamId, Flags.RST, 0));
 
-            await ReadPayloadData(frameHeader.Length, null, token).ConfigureAwait(false);
+            await ReadPayloadData(frameHeader.Length, null, token, discard: true).ConfigureAwait(false);
             return;
-        }
-
-        channel.ProcessIncomingFlags(frameHeader.Flags);
-
-        if (frameHeader.Length > channel.ReceiveWindowUpperBound)
-        {
-            Session.SessionTracer.TraceEvent(TraceEventType.Error, 0, $"[Err] yamux: receive window exceeded (stream: {channel.Id}, length: {frameHeader.Length}, max: {channel.ReceiveWindowUpperBound})");
-
-            _ = _writer.WriteAsync(
-                Frame.CreateGoAwayFrame(SessionTermination.ProtocolError),
-                CancellationToken.None);
-            throw new SessionException(SessionErrorCode.RecvWindowExceeded,
-                $"receive window exceeded (stream: {channel.Id})",
-                SessionTermination.ProtocolError);
         }
 
         if (frameHeader.Length > _sessionOptions.MaxIncomingFrameSize)
         {
             Session.SessionTracer.TraceEvent(TraceEventType.Error, 0, $"[Err] yamux: incoming frame size exceeded (stream: {channel.Id}, length: {frameHeader.Length}, max: {_sessionOptions.MaxIncomingFrameSize})");
 
-            _ = _writer.WriteAsync(
-                Frame.CreateGoAwayFrame(SessionTermination.ProtocolError),
-                CancellationToken.None);
+            _writer.EnqueueFrame(Frame.CreateGoAwayFrame(SessionTermination.ProtocolError));
             throw new SessionException(SessionErrorCode.RecvWindowExceeded,
                 $"incoming frame size exceeded (stream: {channel.Id})",
                 SessionTermination.ProtocolError);
         }
 
-        await ReadPayloadData(frameHeader.Length, channel, token).ConfigureAwait(false);
+        if (!channel.TryConsumeReceiveWindow(frameHeader.Length))
+        {
+            Session.SessionTracer.TraceEvent(TraceEventType.Error, 0, $"[Err] yamux: receive window exceeded (stream: {channel.Id}, length: {frameHeader.Length})");
+
+            _writer.EnqueueFrame(Frame.CreateGoAwayFrame(SessionTermination.ProtocolError));
+            throw new SessionException(SessionErrorCode.RecvWindowExceeded,
+                $"receive window exceeded (stream: {channel.Id})",
+                SessionTermination.ProtocolError);
+        }
+
+        // RST payloads are drained but not delivered. FIN and other flags are
+        // applied only after the payload has been written so a data frame with
+        // FIN does not lose its final bytes.
+        bool discard = frameHeader.Flags.HasFlag((Flags)Flags.RST);
+        await ReadPayloadData(frameHeader.Length, channel, token, discard).ConfigureAwait(false);
+
+        channel.ProcessIncomingFlags(frameHeader.Flags);
     }
 
-    private async ValueTask ReadPayloadData(uint payloadLength, SessionChannel? channel, CancellationToken cancellationToken)
+    private async ValueTask ReadPayloadData(uint payloadLength, SessionChannel? channel, CancellationToken cancellationToken, bool discard)
     {
-        int bytesToRead = (int)payloadLength;
-
-        bool pipeOpen = channel != null && !channel.IsClosed;
-        using var discardBuffer = MemoryPool<byte>.Shared.Rent(4096);
-
-        do
+        int remaining = (int)payloadLength;
+        if (remaining == 0)
         {
-            if (pipeOpen && channel != null)
+            // A zero-length data frame carries no payload. Do not fall through to
+            // the read path: that would either block or consume the next frame.
+            return;
+        }
+
+        if (!discard && channel != null)
+        {
+            while (remaining > 0)
             {
                 try
                 {
@@ -195,9 +196,9 @@ internal class FrameReader
                     var pipeWriter = channel.GetPipeWriter();
                     var buffer = pipeWriter.GetMemory();
 
-                    if (buffer.Length > bytesToRead)
+                    if (buffer.Length > remaining)
                     {
-                        buffer = buffer.Slice(0, bytesToRead);
+                        buffer = buffer.Slice(0, remaining);
                     }
 
                     var read = await _reader.ReadFramePayloadAsync(buffer, cancellationToken).ConfigureAwait(false);
@@ -208,8 +209,7 @@ internal class FrameReader
                     }
 
                     pipeWriter.Advance(read);
-
-                    bytesToRead -= read;
+                    remaining -= read;
 
                     var flushTask = pipeWriter.FlushAsync(cancellationToken);
 
@@ -225,30 +225,45 @@ internal class FrameReader
                     {
                         channel.OffloadPipeFlush(flushTask, pipeWriter);
                     }
+
+                    continue;
                 }
                 catch (InvalidOperationException)
                 {
-                    pipeOpen = false;
+                    // The input pipe was completed (for example by the application
+                    // or by a FIN); drain the rest of the frame without delivering it.
+                    break;
+                }
+            }
+        }
+
+        if (remaining > 0)
+        {
+            using var discardBuffer = MemoryPool<byte>.Shared.Rent(4096);
+
+            while (remaining > 0)
+            {
+                // Cap the read to the bytes still belonging to this frame. Reading
+                // into the full rented buffer would consume the next frame header.
+                var memory = discardBuffer.Memory;
+                if (memory.Length > remaining)
+                {
+                    memory = memory.Slice(0, remaining);
                 }
 
-                _stats?.UpdateReceived(payloadLength);
-                channel.Stats?.UpdateReceived(payloadLength);
-                _metrics?.BytesReceived.Add(payloadLength);
-            }
-            else
-            {
-                Session.SessionTracer.TraceInformation("[WARN] yamux: channel is closed, discarding data for stream {0}", channel?.Id ?? 0);
-
-                var read = await _reader.ReadFramePayloadAsync(discardBuffer.Memory, cancellationToken);
+                var read = await _reader.ReadFramePayloadAsync(memory, cancellationToken).ConfigureAwait(false);
                 if (read == 0)
                 {
                     throw new SessionException(SessionErrorCode.StreamClosed, "Remote connection closed mid-frame");
                 }
-                bytesToRead -= read;
 
-                _stats?.UpdateReceived(payloadLength);
-                _metrics?.BytesReceived.Add(payloadLength);
+                remaining -= read;
             }
-        } while (bytesToRead > 0);
+        }
+
+        // Count each frame once, regardless of how many reads it took.
+        _stats?.UpdateReceived(payloadLength);
+        channel?.RecordReceivedBytes(payloadLength);
+        _metrics?.BytesReceived(payloadLength);
     }
 }
