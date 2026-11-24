@@ -134,7 +134,7 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
                     }
                 }, (this, channel, waitForAck, cancellationToken));
 
-                waitForAck.Task.ContinueWith(static (_, state) => ((CancellationTokenRegistration)state!).Dispose(),
+                _ = waitForAck.Task.ContinueWith(static (_, state) => ((CancellationTokenRegistration)state!).Dispose(),
                     registration, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
             }
 
@@ -149,7 +149,7 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
                         _ = CloseAsync();
                     }
                 });
-                waitForAck.Task.ContinueWith(_ =>
+                _ = waitForAck.Task.ContinueWith(_ =>
                 {
                     try { timeoutCts.Dispose(); } catch { }
                 }, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
