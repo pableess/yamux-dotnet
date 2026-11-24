@@ -81,8 +81,8 @@ public interface IReadOnlySessionChannel : ISessionChannel
 {
     /// <summary>
     /// Gets the <see cref="System.IO.Pipelines.PipeReader"/> for reading data from this channel.
-    /// Completing the reader indicates that the application will not read further data;
-    /// the channel is then treated as half-closed for writing.
+    /// Completing the reader signals that the application will not read further data;
+    /// when the receive loop next observes completion it half-closes the write side.
     /// </summary>
     public PipeReader Input { get; }
 }

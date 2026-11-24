@@ -116,6 +116,8 @@ res = await channel.Input.ReadAsync(TestContext.Current.CancellationToken);
     public async Task ConcurrentReadWrite_SameChannel()
     {
         (var client, var server) = FullDuplexStream.CreatePair();
+        using var clientStream = client;
+        using var serverStream = server;
         var dataSize = 1024 * 64;
         var data = new byte[dataSize];
         new Random().NextBytes(data);
@@ -129,7 +131,7 @@ res = await channel.Input.ReadAsync(TestContext.Current.CancellationToken);
         {
             try
             {
-                await using var session = new Session(new StreamPeer(server), false);
+                await using var session = new Session(new StreamPeer(server), false, leaveOpen: true);
                 session.Start();
                 using var channel = await session.AcceptAsync();
 
@@ -152,7 +154,7 @@ res = await channel.Input.ReadAsync(TestContext.Current.CancellationToken);
         {
             try
             {
-                await using var session = new Session(new StreamPeer(client), true);
+                await using var session = new Session(new StreamPeer(client), true, leaveOpen: true);
                 session.Start();
                 using var channel = await session.OpenChannelAsync();
 

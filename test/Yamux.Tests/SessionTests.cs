@@ -531,6 +531,8 @@ public class SessionTests
     public async Task BidirectionalDataTest()
     {
         (var client, var server) = FullDuplexStream.CreatePair();
+        using var clientStream = client;
+        using var serverStream = server;
         var clientToServer = new Faker().Random.Bytes(1024 * 100);
         var serverToClient = new Faker().Random.Bytes(1024 * 100);
 
@@ -543,7 +545,7 @@ public class SessionTests
         {
             try
             {
-                await using var serverSession = new Session(new StreamPeer(server), false);
+                await using var serverSession = new Session(new StreamPeer(server), false, leaveOpen: true);
                 serverSession.Start();
                 using var channel = await serverSession.AcceptAsync(TestContext.Current.CancellationToken);
 
@@ -567,7 +569,7 @@ public class SessionTests
         {
             try
             {
-                await using var clientSession = new Session(new StreamPeer(client), true);
+                await using var clientSession = new Session(new StreamPeer(client), true, leaveOpen: true);
                 clientSession.Start();
                 using var channel = await clientSession.OpenChannelAsync(cancellationToken: TestContext.Current.CancellationToken);
 

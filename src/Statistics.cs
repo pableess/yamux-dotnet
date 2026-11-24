@@ -19,12 +19,12 @@ public class Statistics : IDisposable
     private bool _disposed;
 
     /// <summary>
-    /// Gets the total bytes sent.
+    /// Gets the total payload bytes sent. Frame headers are not included.
     /// </summary>
     public ulong TotalBytesSent => Interlocked.Read(ref _totalBytesSent);
 
     /// <summary>
-    /// Gets the total bytes received.
+    /// Gets the total payload bytes received. Frame headers are not included.
     /// </summary>
     public ulong TotalBytesReceived => Interlocked.Read(ref _totalBytesReceived);
 
@@ -45,6 +45,7 @@ public class Statistics : IDisposable
 
     /// <summary>
     /// Occurs each time bandwidth statistics are sampled, at the interval specified by <see cref="SampleInterval"/>.
+    /// Handler exceptions are ignored so they cannot terminate the sampling timer.
     /// </summary>
     public event EventHandler? Sampled;
 

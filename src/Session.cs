@@ -98,7 +98,7 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
     /// <param name="cancellationToken">A cancellation token to cancel the open operation.</param>
     /// <returns>A <see cref="ValueTask"/> representing the asynchronous operation, with the opened channel.</returns>
     /// <exception cref="SessionException">Thrown when the session is in GoAway state or channels have been exhausted.</exception>
-    public ValueTask<IDuplexSessionChannel> OpenChannelAsync(SessionChannelOptions options, bool waitForAcknowledgement = false, CancellationToken cancellationToken = default)
+    public async ValueTask<IDuplexSessionChannel> OpenChannelAsync(SessionChannelOptions options, bool waitForAcknowledgement = false, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(options);
         options.Validate();
@@ -158,15 +158,26 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
             _channelManager.TrackConnect(id, waitForAck);
         }
 
-        // Sends SYN (and the initial window increase) in a single frame.
-        channel.SendInitialWindowUpdate();
+        try
+        {
+            // Send SYN (and the initial window increase) as a completed write so
+            // the caller cannot enqueue data before the peer knows the stream.
+            await channel.SendInitialWindowUpdateAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            waitForAck?.TrySetException(ex);
+            _channelManager.FailConnect(id, accept: false);
+            try { channel.Dispose(); } catch { }
+            throw;
+        }
 
         if (waitForAck != null)
         {
-            return new ValueTask<IDuplexSessionChannel>(waitForAck.Task);
+            return await waitForAck.Task.ConfigureAwait(false);
         }
 
-        return ValueTask.FromResult((IDuplexSessionChannel)channel);
+        return channel;
     }
 
     private void CancelPendingOpen(SessionChannel channel)
@@ -265,6 +276,8 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
 
     /// <summary>
     /// Sends a ping to the remote peer and measures the round-trip time.
+    /// A response that does not arrive within <see cref="SessionOptions.ConnectionWriteTimeout"/>
+    /// causes a <see cref="TimeoutException"/>.
     /// </summary>
     /// <param name="cancellationToken">A cancellation token to cancel the ping operation.</param>
     /// <returns>A <see cref="ValueTask"/> representing the asynchronous operation, with the measured round-trip time.</returns>
@@ -311,7 +324,10 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
     public bool IsClosed => _isClosed;
 
     /// <summary>
-    /// Gracefully closes the session, draining all open channels before disposing the transport.
+    /// Closes the session and force-closes all open channels. This method is
+    /// idempotent and best-effort: failures during shutdown do not leave the
+    /// session stuck in a closing state. Use <see cref="CloseOpenChannelsAsync"/>
+    /// for a graceful drain.
     /// </summary>
     /// <returns>A <see cref="Task"/> representing the asynchronous close operation.</returns>
     public Task CloseAsync() => this.CloseAsync(null);

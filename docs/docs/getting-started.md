@@ -4,11 +4,22 @@ title: Getting Started
 
 # Getting Started with Yamux
 
-Yamux allows you to multiplex multiple logical streams over a single network connection, stream, or custom transport. This is useful for building efficient networked applications that require multiple independent data streams over a single connection.
+Yamux multiplexes independent, ordered streams (channels) over one reliable
+connection. This guide shows the typical lifecycle: start a session, open/accept
+channels, read and write, then close and dispose.
 
-## Basic Setup
+## Prerequisites
 
-### Server Side
+- .NET 9, .NET 10, or .NET 11
+- `dotnet add package Yamux`
+
+## Basic setup
+
+A `Session` must be started before channels are opened or accepted.
+`Session` implements `IAsyncDisposable`; use `await using` so the transport and
+background loops are released.
+
+### Server
 
 ```csharp
 using System.Net;
@@ -18,13 +29,13 @@ using Yamux;
 var listener = new Socket(SocketType.Stream, ProtocolType.Tcp);
 listener.Bind(new IPEndPoint(IPAddress.Loopback, 5000));
 listener.Listen();
-var clientSocket = await listener.AcceptAsync();
 
-using var yamuxSession = new NetworkStream(clientSocket).AsYamuxSession(false);
-yamuxSession.Start();
+var socket = await listener.AcceptAsync();
+await using var session = socket.AsYamuxSession(isClient: false);
+session.Start();
 ```
 
-### Client Side
+### Client
 
 ```csharp
 using System.Net;
@@ -34,138 +45,167 @@ using Yamux;
 var socket = new Socket(SocketType.Stream, ProtocolType.Tcp);
 await socket.ConnectAsync(new IPEndPoint(IPAddress.Loopback, 5000));
 
-using var yamuxSession = new NetworkStream(socket).AsYamuxSession(true);
-yamuxSession.Start();
+await using var session = socket.AsYamuxSession(isClient: true);
+session.Start();
 ```
 
-## Working with Channels
+## Working with channels
 
-Once you have a Yamux session established, you can create and manage multiple channels over the same connection.
-
-### Opening and Accepting Channels
+### Opening and accepting
 
 ```csharp
-// Opening a new channel (Client side)
-var channel = await yamuxSession.OpenChannelAsync();
+// Client: open a channel. waitForAcknowledgement waits for the peer ACK.
+using var outbound = await session.OpenChannelAsync(waitForAcknowledgement: true);
 
-// Accepting incoming channels (Server side)
-var channel = await yamuxSession.AcceptAsync();
+// Server: accept an incoming channel. Reset channels are skipped automatically.
+using var inbound = await session.AcceptAsync();
 ```
 
-### Reading from a Channel
+### Reading
 
-You can read data from the channel using its `Input` pipe:
+Data is exposed as a `System.IO.Pipelines.PipeReader`:
 
 ```csharp
-async Task HandleChannelAsync(ISessionChannel channel)
+static async Task ReadChannelAsync(
+    IReadOnlySessionChannel channel,
+    CancellationToken cancellationToken)
 {
-    try
+    while (true)
     {
-        var reader = channel.Input;
-        while (true)
+        var result = await channel.Input.ReadAsync(cancellationToken);
+
+        try
         {
-            var result = await reader.ReadAsync();
-            var buffer = result.Buffer;
-            try
+            if (result.IsCanceled)
             {
-                if (result.IsCanceled)
-                    break;
-                // Process the data in the buffer
-                foreach (var segment in buffer)
-                {
-                    // Work with the data...
-                }
-                if (result.IsCompleted)
-                    break;
+                break;
             }
-            finally
+
+            foreach (var segment in result.Buffer)
             {
-                reader.AdvanceTo(buffer.Start, buffer.End);
+                // Consume segment.Span ...
             }
         }
-    }
-    finally
-    {
-        channel.Close();
-        channel.Dispose();
+        finally
+        {
+            channel.Input.AdvanceTo(result.Buffer.End, result.Buffer.End);
+        }
+
+        if (result.IsCompleted)
+        {
+            break;
+        }
     }
 }
 ```
 
-### Writing to a Channel
+Consuming data sends receive-window updates to the peer. Completing the reader
+signals that the application will not read further; when the receive loop next
+observes completion it half-closes the channel's write side.
+
+### Writing
 
 ```csharp
 await channel.WriteAsync(myData);
 ```
 
-### Converting a Channel to a Stream
+Writes are serialized per channel and respect the peer's receive window. A write
+that cannot obtain window credit within `SessionOptions.StreamSendTimeout`
+throws `TimeoutException`.
 
-If you prefer working with streams, you can convert a channel to a `Stream`:
+### Stream conversion
 
 ```csharp
-using var stream = channel.AsStream();
-await stream.WriteAsync(buffer, 0, buffer.Length);
-await stream.FlushAsync();
+await using var stream = channel.AsStream(leaveOpen: true);
+await stream.WriteAsync(buffer, cancellationToken);
+await stream.FlushAsync(cancellationToken);
 ```
 
-### Closing and Disposing Channels
+`AsStream(leaveOpen: true)` keeps the channel open when the stream is disposed.
+Synchronous stream APIs (`Read`, `Write`, `Seek`, etc.) are not supported.
 
-It is important to properly close and dispose of channels when you are done with them:
+### Closing and disposing
 
 ```csharp
-// Gracefully close the channel (write side)
-channel.Close();
-
-// Wait for the remote peer to acknowledge the close
+channel.Close();                              // FIN: half-close the write side
 await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(5));
-
-// Dispose the channel to release resources
-channel.Dispose();
+channel.Dispose();                            // or rely on using/await using
 ```
 
-You can also use a `using` statement for automatic disposal:
+- `Close()` is a no-op after disposal.
+- `Abort()` sends RST and closes both directions immediately.
+- `WhenRemoteCloseAsync` returns `false` on timeout.
+- Writes after close throw `SessionChannelException` with `ChannelWriteClosed`.
 
-```csharp
-using (var channel = await yamuxSession.OpenChannelAsync())
-{
-    // Use the channel
-    channel.Close();
-}
-```
-
-## Channel Options
-
-When opening a new channel, you can specify custom options:
+## Channel options
 
 ```csharp
 var options = new SessionChannelOptions
 {
-    ReceiveWindowSize = 256 * 1024,         // 256KB window size
-    ReceiveWindowUpperBound = 4 * 1024 * 1024 // 4MB receive window upper bound
+    ReceiveWindowSize = 512 * 1024,        // >= 256 KB
+    ReceiveWindowUpperBound = 4 * 1024 * 1024,
+    MaxDataFrameSize = 32 * 1024,
+    AutoTuneReceiveWindowSize = true,
 };
 
-var channel = await yamuxSession.OpenChannelAsync(options);
+options.Validate();
+
+using var channel = await session.OpenChannelAsync(options);
 ```
 
-## Monitoring Statistics
+`ReceiveWindowSize` cannot be below 256 KB or above `ReceiveWindowUpperBound`.
 
-Enable statistics on the session:
+## Session options
 
 ```csharp
-var sessionOptions = new SessionOptions
+var options = new SessionOptions
 {
-    EnableStatistics = true
+    EnableKeepAlive = true,
+    KeepAliveInterval = TimeSpan.FromSeconds(30),
+    StreamOpenTimeout = TimeSpan.FromSeconds(75),
+    ConnectionWriteTimeout = TimeSpan.FromSeconds(10),
+    SessionCloseTimeout = TimeSpan.FromSeconds(30),
+    EnableStatistics = true,
+    StatisticsSampleInterval = 1000,
+    EnableMetrics = true,
 };
 
-using var yamuxSession = new NetworkStream(socket).AsYamuxSession(true, sessionOptions);
-yamuxSession.Start();
+await using var session = socket.AsYamuxSession(
+    isClient: true,
+    leaveOpen: false,
+    options: options);
+session.Start();
+```
 
-// Subscribe to session statistics
-if (yamuxSession.Stats != null)
+See [SessionOptions](SessionOptions.md) for every setting and its default.
+
+## Monitoring statistics
+
+```csharp
+var options = new SessionOptions
 {
-    yamuxSession.Stats.Sampled += (sender, args) =>
-    {
-        Console.WriteLine($"Send rate: {yamuxSession.Stats.SendRate}/sec, Receive rate: {yamuxSession.Stats.ReceiveRate}/sec");
-    };
+    EnableStatistics = true,
+    StatisticsSampleInterval = 1000,
+};
+
+await using var session = socket.AsYamuxSession(isClient: true, options: options);
+session.Start();
+
+var stats = session.Stats;
+if (stats is not null)
+{
+    stats.Sampled += (_, _) =>
+        Console.WriteLine($"TX {stats.SendRate}/s  RX {stats.ReceiveRate}/s");
 }
 ```
+
+Session statistics stop when the session closes. Enable
+`SessionChannelOptions.EnableStatistics` for per-channel totals.
+
+## Next steps
+
+- [Session](Session.md) — lifecycle, GoAway, keep-alive, shutdown
+- [Channels](Channels.md) — channel interfaces and semantics
+- [SessionChannelOptions](SessionChannelOptions.md) — flow control
+- [Transport](Transport.md) — custom transports and batching
+- [Exceptions](Exceptions.md) — error codes and failure modes

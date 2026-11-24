@@ -248,6 +248,120 @@ namespace Yamux.Benchmark
             }
 
 
+            /// <summary>
+            /// C# client opens channels and streams data to a C# server that drains
+            /// them. Mirrors <see cref="GoIntegrationAsync"/> for a direct
+            /// C#-to-C# / C#-to-Go comparison.
+            /// </summary>
+            [Benchmark]
+            public async Task<double> CsharpToCsharpAsync()
+            {
+                var sw = new Stopwatch();
+                var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                int readyCount = 0;
+
+                void SignalReady()
+                {
+                    if (Interlocked.Increment(ref readyCount) == 2)
+                    {
+                        sw.Start();
+                        ready.TrySetResult();
+                    }
+                }
+
+                int iterationsPerStream = (MBs * 32) / Streams;
+                long totalBytes = (long)iterationsPerStream * Streams * 1024 * 32;
+
+                var serverTask = Task.Run(async () =>
+                {
+                    var sock = await _serverSock!.AcceptAsync();
+                    var opt = new SessionOptions
+                    {
+                        EnableKeepAlive = false,
+                    };
+                    await using var session = sock.AsYamuxSession(false, options: opt);
+                    session.Start();
+
+                    SignalReady();
+                    await ready.Task;
+
+                    List<Task> channels = new List<Task>();
+                    long expected = (long)iterationsPerStream * 1024 * 32;
+
+                    for (int i = 0; i < Streams; i++)
+                    {
+                        channels.Add(Task.Run(async () =>
+                        {
+                            using var channel = await session.AcceptAsync();
+                            long received = 0;
+
+                            while (received < expected)
+                            {
+                                var result = await channel.Input.ReadAsync();
+                                received += result.Buffer.Length;
+                                channel.Input.AdvanceTo(result.Buffer.End, result.Buffer.End);
+
+                                if (result.IsCompleted)
+                                {
+                                    break;
+                                }
+                            }
+                        }));
+                    }
+
+                    await Task.WhenAll(channels);
+                });
+
+                var clientTask = Task.Run(async () =>
+                {
+                    var sock = new Socket(SocketType.Stream, ProtocolType.Tcp);
+                    await sock.ConnectAsync(new IPEndPoint(IPAddress.Loopback, _port));
+
+                    var opt = new SessionOptions
+                    {
+                        EnableKeepAlive = false,
+                        DefaultChannelOptions = new SessionChannelOptions
+                        {
+                            MaxDataFrameSize = 1024 * 64,
+                        }
+                    };
+                    await using var session = sock.AsYamuxSession(true, options: opt);
+                    session.Start();
+
+                    SignalReady();
+                    await ready.Task;
+
+                    List<Task> channels = new List<Task>();
+
+                    for (int i = 0; i < Streams; i++)
+                    {
+                        channels.Add(Task.Run(async () =>
+                        {
+                            using var channel = await session.OpenChannelAsync(false);
+
+                            for (int j = 0; j < iterationsPerStream; j++)
+                            {
+                                await channel.WriteAsync(_buffer);
+                            }
+
+                            channel.Close();
+                        }));
+                    }
+
+                    await Task.WhenAll(channels);
+
+                    // Keep the client session open until the in-process server has
+                    // finished draining; otherwise the client socket can be closed
+                    // mid-read and the server observes a connection reset.
+                    await serverTask;
+                });
+
+                await Task.WhenAll(serverTask, clientTask);
+                sw.Stop();
+
+                return totalBytes / (1024.0 * 1024.0) / sw.Elapsed.TotalSeconds;
+            }
+
             [Benchmark]
             public async Task<double> TcpNerdbankAsync()
             {

@@ -31,6 +31,8 @@ internal class ChannelManager
         {
             FullMode = BoundedChannelFullMode.Wait,
             SingleWriter = true,
+            // Session.AcceptAsync may be called concurrently by applications.
+            SingleReader = false,
         });
     }
 

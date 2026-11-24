@@ -11,6 +11,10 @@ og_type: website
       A high-performance .NET implementation of the <a href="https://github.com/hashicorp/yamux">HashiCorp Yamux multiplexing protocol</a>.<br>
       Multiple reliable, ordered, independent streams over a <strong>single</strong> underlying connection.
     </p>
+    <p class="text-muted">
+      Targets .NET 9, .NET 10, and .NET 11. Interoperability is verified in both
+      directions against HashiCorp yamux v0.1.2.
+    </p>
     <div class="d-flex justify-content-center gap-3 mt-4 flex-wrap">
       <a href="{{site.basepath}}/docs/getting-started/" class="btn btn-primary btn-lg"><i class="bi bi-rocket-takeoff"></i> Getting Started</a>
       <a href="{{site.basepath}}/docs/Session/" class="btn btn-outline-secondary btn-lg"><i class="bi bi-book"></i> Documentation</a>
@@ -84,7 +88,8 @@ og_type: website
         <div class="card-header display-6"><i class="bi bi-speedometer2"></i> High performance</div>
         <div class="card-body">
           <p class="card-text">
-            Pooled value task sources, lock-free ID generation, AOT compatible, and native publish support.
+            Pooled value task sources, reusable batch buffers, lock-free ID generation,
+            batched scatter/gather writes, and AOT annotations.
           </p>
           <a href="{{site.basepath}}/docs/Performance/" class="btn btn-outline-primary btn-sm">Benchmarks</a>
         </div>

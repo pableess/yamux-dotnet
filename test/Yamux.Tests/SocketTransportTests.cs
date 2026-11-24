@@ -221,7 +221,7 @@ res = await channel.Input.ReadAsync(TestContext.Current.CancellationToken);
             try
             {
                 using var clientSocket = await listener.AcceptAsync(TestContext.Current.CancellationToken);
-                await using var session = clientSocket.AsYamuxSession(false);
+                await using var session = clientSocket.AsYamuxSession(false, leaveOpen: true);
                 session.Start();
                 using var channel = await session.AcceptAsync(TestContext.Current.CancellationToken);
 
@@ -248,7 +248,7 @@ res = await channel.Input.ReadAsync(TestContext.Current.CancellationToken);
                 using var sock = new Socket(SocketType.Stream, ProtocolType.Tcp);
                 await sock.ConnectAsync(new IPEndPoint(IPAddress.Loopback, port), TestContext.Current.CancellationToken);
 
-                await using var session = sock.AsYamuxSession(true);
+                await using var session = sock.AsYamuxSession(true, leaveOpen: true);
                 session.Start();
                 using var channel = await session.OpenChannelAsync(cancellationToken: TestContext.Current.CancellationToken);
 

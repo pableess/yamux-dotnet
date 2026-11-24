@@ -300,7 +300,8 @@ public class ProtocolRobustnessTests
 
         Action act = () => generator.Next();
 
-        act.Should().Throw<InvalidOperationException>();
+        act.Should().Throw<SessionException>()
+            .Which.ErrorCode.Should().Be(SessionErrorCode.StreamsExhausted);
     }
 
     [Fact]

@@ -439,10 +439,14 @@ internal class SessionChannel : IDuplexSessionChannel
 
     /// <summary>
     /// Sends the SYN frame for a locally initiated channel, carrying the initial
-    /// window increase in the same frame so the peer sees a single SYN.
+    /// window increase in the same frame so the peer sees a single SYN. The write
+    /// is awaited so a following data frame can never overtake the SYN.
     /// </summary>
-    internal void SendInitialWindowUpdate()
+    internal async ValueTask SendInitialWindowUpdateAsync(CancellationToken cancellationToken)
     {
+        Flags flags;
+        uint delta;
+
         lock (_stateLock)
         {
             if (_localPhase != ChannelLocalPhase.None)
@@ -450,15 +454,23 @@ internal class SessionChannel : IDuplexSessionChannel
                 return;
             }
 
-            var delta = _channelOptions.ReceiveWindowSize > _advertisedWindowSize
+            delta = _channelOptions.ReceiveWindowSize > _advertisedWindowSize
                 ? _channelOptions.ReceiveWindowSize - _advertisedWindowSize
                 : 0;
             _advertisedWindowSize = _channelOptions.ReceiveWindowSize;
             _receiveWindowMax = _channelOptions.ReceiveWindowSize;
 
             // GetSendFlags sets SYN and transitions to SynSent.
-            this.SendWindowUpdate(delta);
+            flags = GetSendFlags();
+
+            if (delta > 0)
+            {
+                Interlocked.Add(ref _receiveWindowRemaining, delta);
+            }
         }
+
+        var frame = Frame.CreateWindowUpdateFrame(Id, flags, delta);
+        await _session.SendFrameAsync(frame, cancellationToken).ConfigureAwait(false);
     }
 
     internal ValueTask ApplyOptionsAsync(SessionChannelOptions options, CancellationToken cancel)

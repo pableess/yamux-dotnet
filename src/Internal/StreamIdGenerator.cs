@@ -20,7 +20,7 @@ class StreamIdGenerator
         // manually before handing out an id that may collide with an existing stream.
         if (value <= 1)
         {
-            throw new InvalidOperationException("Streams exhausted");
+            throw new SessionException(SessionErrorCode.StreamsExhausted, "Streams exhausted");
         }
 
         return value - 1;
