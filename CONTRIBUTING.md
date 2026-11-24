@@ -19,6 +19,18 @@ dotnet test --filter "FullyQualifiedName~SessionTests"
 dotnet test --filter "FullyQualifiedName~SocketTransportTests"
 ```
 
+## Interoperability and compatibility tests
+
+Cross-implementation tests live in `test/Yamux.Interop.Tests`. They build the Go
+reference implementation (`benchmarks/go-interop`) and exercise both directions:
+
+```bash
+dotnet test test/Yamux.Interop.Tests
+```
+
+The tests are skipped when the Go toolchain is not installed. GitHub Actions
+installs Go before running the test suite.
+
 ## Benchmarks
 
 The benchmark project compares Yamux against raw TCP, Go Yamux, and Nerdbank.Streams.
@@ -27,17 +39,13 @@ The benchmark project compares Yamux against raw TCP, Go Yamux, and Nerdbank.Str
 dotnet run -c Release --project benchmarks/Yamux.Benchmark
 ```
 
-To compare with the Go implementation, first build the Go server:
+To compare against the Go implementation on Linux or macOS:
 
 ```bash
-pwsh benchmarks/build-go-server.ps1
+bash benchmarks/compare.sh
 ```
 
-Then run the comparison:
-
-```bash
-pwsh benchmarks/compare.ps1
-```
+On Windows, use the PowerShell scripts:
 
 ## Project Structure
 

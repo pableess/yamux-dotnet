@@ -41,15 +41,39 @@ namespace Yamux
         /// <inheritdoc />
         public void Close()
         {
-            _socket.Shutdown(System.Net.Sockets.SocketShutdown.Both);
-            _socket.Close();
+            try
+            {
+                _socket.Shutdown(System.Net.Sockets.SocketShutdown.Both);
+            }
+            catch (System.Net.Sockets.SocketException)
+            {
+                // Already disconnected; closing below is still required.
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+
+            try
+            {
+                _socket.Close();
+            }
+            catch (ObjectDisposedException)
+            {
+            }
         }
 
         /// <inheritdoc />
         public void Dispose()
         {
             _writeEventArgs.Dispose();
-            _socket.Dispose();
+
+            try
+            {
+                _socket.Dispose();
+            }
+            catch (ObjectDisposedException)
+            {
+            }
         }
 
         /// <inheritdoc />

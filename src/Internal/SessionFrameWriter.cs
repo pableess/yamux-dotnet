@@ -77,15 +77,15 @@ internal class SessionFrameWriter
                             seg1.SetNext(seg2);
                             var sequence = new ReadOnlySequence<byte>(seg1, 0, seg2, item.Frame.Payload.Length);
                             await _peer.WriteAsync(sequence, default).ConfigureAwait(false);
-                            _stats?.UpdateSent((uint)item.Frame.Payload.Length);
-                            _metrics?.BytesSent.Add(item.Frame.Payload.Length);
+                            _stats?.UpdateSent((ulong)item.Frame.Payload.Length);
+                            _metrics?.BytesSent(item.Frame.Payload.Length);
                         }
                         else
                         {
                             await _peer.WriteAsync(headerBuffer.AsMemory(0, FrameHeader.FrameHeaderSize), default).ConfigureAwait(false);
                         }
 
-                        _metrics?.FramesSent.Add(1);
+                        _metrics?.FrameSent();
                         item.Complete();
                     }
                     catch (OperationCanceledException cancelEx)
@@ -122,13 +122,16 @@ internal class SessionFrameWriter
                 List<WriteItem> batch = new();
                 WriteSegment? head = null, tail = null;
                 long runningIndex = 0;
+                long payloadBytes = 0;
                 int totalBytes = 0;
+                bool sawFlushMarker = false;
 
                 while (_writeQueue.Reader.TryRead(out var item))
                 {
                     if (item.IsFlushMarker)
                     {
                         batch.Add(item);
+                        sawFlushMarker = true;
                         break;
                     }
 
@@ -154,6 +157,7 @@ internal class SessionFrameWriter
                         AppendSegment(ref head, ref tail, paySeg);
                         runningIndex += item.Frame.Payload.Length;
                         totalBytes += item.Frame.Payload.Length;
+                        payloadBytes += item.Frame.Payload.Length;
                     }
 
                     if (totalBytes >= _minBatchSize)
@@ -167,8 +171,8 @@ internal class SessionFrameWriter
                     {
                         var sequence = new ReadOnlySequence<byte>(head, 0, tail!, tail!.Memory.Length);
                         await _peer.WriteAsync(sequence, default).ConfigureAwait(false);
-                        _stats?.UpdateSent((uint)runningIndex);
-                        _metrics?.BytesSent.Add(runningIndex);
+                        _stats?.UpdateSent((ulong)payloadBytes);
+                        _metrics?.BytesSent(payloadBytes);
                     }
                     catch (OperationCanceledException cancelEx)
                     {
@@ -187,6 +191,23 @@ internal class SessionFrameWriter
                         ReturnSegment(seg);
                 }
 
+                if (sawFlushMarker && batchError == null)
+                {
+                    try
+                    {
+                        // The flush marker is a barrier: honor the transport's
+                        // FlushAsync before completing it, even when no frames
+                        // were pending in this batch.
+                        await _peer.FlushAsync(default).ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        if (Session.SessionTracer.Switch.ShouldTrace(TraceEventType.Error))
+                            Session.SessionTracer.TraceEvent(TraceEventType.Error, 0, "[Err] yamux: error flushing transport - {0}", ex.Message);
+                        batchError = ex;
+                    }
+                }
+
                 foreach (var item in batch)
                 {
                     if (item.IsFlushMarker)
@@ -199,9 +220,14 @@ internal class SessionFrameWriter
                     else
                     {
                         if (batchError != null)
+                        {
                             item.Fault(batchError);
+                        }
                         else
+                        {
+                            _metrics?.FrameSent();
                             item.Complete();
+                        }
                     }
                 }
             }

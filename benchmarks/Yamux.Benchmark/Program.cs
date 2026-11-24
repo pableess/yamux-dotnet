@@ -14,9 +14,9 @@ namespace Yamux.Benchmark
 {
     public class Program
     {
-        public static async Task Main(string[] args)
+        public static void Main(string[] args)
         {
-            var summary = BenchmarkRunner.Run<Yamux>();
+            BenchmarkSwitcher.FromAssembly(typeof(Program).Assembly).Run(args);
         }
 
         [SimpleJob(RunStrategy.Throughput, launchCount: 1, warmupCount: 1, invocationCount: 2)]
@@ -54,10 +54,13 @@ namespace Yamux.Benchmark
                 _port = ((IPEndPoint)_serverSock.LocalEndPoint!).Port;
 
                 var dir = new DirectoryInfo(AppContext.BaseDirectory);
-                while (dir != null && !dir.EnumerateFiles("Yamux.sln").Any())
+                while (dir != null
+                    && !File.Exists(Path.Combine(dir.FullName, "Yamux.slnx"))
+                    && !File.Exists(Path.Combine(dir.FullName, "Yamux.sln")))
                     dir = dir.Parent;
-                var repoRoot = dir?.FullName ?? throw new InvalidOperationException("Cannot find Yamux.sln");
-                _goServerPath = Path.Combine(repoRoot, "benchmarks", "bin", "go-server.exe");
+                var repoRoot = dir?.FullName ?? throw new InvalidOperationException("Cannot find Yamux.slnx");
+                var goServerName = OperatingSystem.IsWindows() ? "go-server.exe" : "go-server";
+                _goServerPath = Path.Combine(repoRoot, "benchmarks", "bin", goServerName);
             }
 
             [GlobalCleanup]

@@ -1,37 +1,33 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
+﻿using Yamux.Protocol;
 
 namespace Yamux.Internal;
 
 /// <summary>
-/// helper class for tracking the data window of the remote peer
-/// give ability to wait both synchronously or asynchronously until send window becomes availible
-/// 
+/// Tracks the send window granted by the remote peer.
+/// Allows waiting asynchronously until window credit becomes available.
 /// </summary>
-/// <param name="defaultSize"></param>
-internal class RemoteDataWindow(uint defaultSize = 256 * 1024) : IDisposable
+internal sealed class RemoteDataWindow(uint defaultSize = Constants.Initial_Window_Size) : IDisposable
 {
     private uint _available = defaultSize;
-    private Lock _dataLock = new Lock();
-    private Queue<Waiter> _waiters = new Queue<Waiter>();
-    private bool _disposedValue;
+    private readonly Lock _dataLock = new();
+    private readonly Queue<Waiter> _waiters = new();
+    private volatile bool _disposedValue;
 
     public void Extend(uint length)
     {
-        // no op
-        if (length is 0)
+        if (length == 0)
         {
             return;
         }
 
-        // lock the window
         lock (_dataLock)
         {
-            _available += length;
+            if (_disposedValue)
+            {
+                return;
+            }
 
+            _available = (uint)Math.Min((ulong)_available + length, uint.MaxValue);
             SignalWaiters();
         }
     }
@@ -40,41 +36,49 @@ internal class RemoteDataWindow(uint defaultSize = 256 * 1024) : IDisposable
     {
         lock (_dataLock)
         {
-            if (_available == 0)
-            {
-                return 0;
-            }
-            else if (_available >= length)
-            {
-                _available -= length;
-                return length;
-            }
-            else
-            {
-                var consumed = _available;
-                _available = 0;
-                return consumed;
-            }
+            return TryConsumeLocked(length);
         }
     }
 
+    private uint TryConsumeLocked(uint length)
+    {
+        if (_available == 0 || length == 0)
+        {
+            return 0;
+        }
+
+        if (_available >= length)
+        {
+            _available -= length;
+            return length;
+        }
+
+        var consumed = _available;
+        _available = 0;
+        return consumed;
+    }
+
     /// <summary>
-    /// Spends as many bytes up to the requested length from the data window that it can/
-    /// If no bytes are currently availble it will block until some become availible but will not wait for all the requestd length.
+    /// Spends as many bytes up to the requested length from the data window that it can.
+    /// If no bytes are currently available it blocks until some become available but does not
+    /// wait for the full requested length.
     /// </summary>
-    /// <param name="length"></param>
-    /// <param name="timeout"></param>
-    /// <returns>The number of bytes that were acquired</returns>
-    /// <exception cref="TimeoutException">Throws timeout exception if timeout occurs before any bytes are available from the window</exception>
+    /// <returns>The number of bytes that were acquired.</returns>
+    /// <exception cref="TimeoutException">Thrown when the timeout expires before any bytes are available.</exception>
     public uint WaitConsume(uint length, TimeSpan? timeout)
     {
         ThrowIfDisposed();
+
+        if (length == 0)
+        {
+            return 0;
+        }
+
         SyncWaiter? waiter;
-        uint consumed = 0;
         using (_dataLock.EnterScope())
         {
-            // try to consume without waiting for more window
-            if ((consumed = TryConsume(length)) > 0)
+            var consumed = TryConsumeLocked(length);
+            if (consumed > 0)
             {
                 return consumed;
             }
@@ -82,36 +86,39 @@ internal class RemoteDataWindow(uint defaultSize = 256 * 1024) : IDisposable
             waiter = new SyncWaiter(length);
             _waiters.Enqueue(waiter);
         }
-        consumed = waiter.Wait(timeout);
+
+        var granted = waiter.Wait(timeout ?? Timeout.InfiniteTimeSpan);
 
         ThrowIfDisposed();
 
-        return consumed;
+        return granted;
     }
 
-
     /// <summary>
-    /// Spends as many bytes up to the requested length from the data window that it can
-    /// If no bytes are currently availble it will asynchronously wait util some become availible but will not wait for all the requestd length.
+    /// Spends as many bytes up to the requested length from the data window that it can.
+    /// If no bytes are currently available it waits asynchronously until some become available
+    /// but does not wait for the full requested length.
     /// </summary>
-    /// <param name="length"></param>
-    /// <param name="timeout"></param>
-    /// <param name="cancellationToken">A cancellation token to cancel the wait operation.</param>
-    /// <returns>The number of bytes that were acquired</returns>
-    /// <exception cref="TimeoutException">Throws timeout exception if timeout occurs before any bytes are available from the window</exception>
+    /// <returns>The number of bytes that were acquired.</returns>
+    /// <exception cref="TimeoutException">Thrown when the timeout expires before any bytes are available.</exception>
     public ValueTask<uint> WaitConsumeAsync(uint length, TimeSpan? timeout = null, CancellationToken? cancellationToken = null)
     {
         ThrowIfDisposed();
 
+        if (length == 0)
+        {
+            return ValueTask.FromResult(0u);
+        }
+
         AsyncWaiter? waiter;
         using (_dataLock.EnterScope())
         {
-            uint consumed = 0;
-            // try to consume without waiting for more window
-            if ((consumed = TryConsume(length)) > 0)
+            var consumed = TryConsumeLocked(length);
+            if (consumed > 0)
             {
                 return ValueTask.FromResult(consumed);
             }
+
             waiter = new AsyncWaiter(length, timeout, cancellationToken);
             _waiters.Enqueue(waiter);
         }
@@ -121,31 +128,17 @@ internal class RemoteDataWindow(uint defaultSize = 256 * 1024) : IDisposable
 
     private void SignalWaiters()
     {
-        do
+        while (_available > 0 && _waiters.TryDequeue(out var waiter))
         {
-            if (_waiters.TryDequeue(out var waiter))
+            // A waiter that was already canceled, timed out, or disposed does not
+            // consume window credit. It stays eligible for the next extension only
+            // if it was granted, so skip it and continue with the next one.
+            if (waiter.TryGrant(_available, out var granted))
             {
-                waiter.Signal(_available);
-
-                if (waiter.Requested < _available)
-                {
-                    // update the availble 
-                    _available -= waiter.Requested;
-                }
-                else
-                {
-                    _available = 0;
-                    return;
-                }
-            }
-            else
-            {
-                return;
+                _available -= granted;
             }
         }
-        while (_available > 0);
     }
-
 
     public uint Available
     {
@@ -160,120 +153,188 @@ internal class RemoteDataWindow(uint defaultSize = 256 * 1024) : IDisposable
         }
     }
 
-    private abstract class Waiter
+    private abstract class Waiter(uint requested)
     {
-        public abstract void Signal(uint available);
+        private const int Pending = 0;
+        private const int Granted = 1;
+        private const int Abandoned = 2;
+
+        private int _state;
+        private bool _disposed;
+
+        public uint Requested { get; } = requested;
+
+        protected bool Disposed => _disposed;
+
+        /// <summary>
+        /// Tries to complete the waiter with up to <paramref name="available"/> bytes.
+        /// Returns false when the waiter was already abandoned (canceled/timed out).
+        /// </summary>
+        public bool TryGrant(uint available, out uint granted)
+        {
+            granted = Math.Min(available, Requested);
+
+            if (Interlocked.CompareExchange(ref _state, Granted, Pending) != Pending)
+            {
+                granted = 0;
+                return false;
+            }
+
+            Grant(granted);
+            return true;
+        }
+
+        /// <summary>
+        /// Marks the waiter as abandoned. Returns true if this call won the race
+        /// against a concurrent grant or completion.
+        /// </summary>
+        public bool TryAbandon()
+        {
+            return Interlocked.CompareExchange(ref _state, Abandoned, Pending) == Pending;
+        }
 
         public abstract void SignalDisposed();
 
-        public abstract uint Requested { get; }
+        protected void MarkDisposed() => _disposed = true;
+
+        protected abstract void Grant(uint granted);
     }
 
-    private class SyncWaiter(uint requested) : Waiter
+    private sealed class SyncWaiter(uint requested) : Waiter(requested)
     {
-        private readonly ManualResetEventSlim _signal = new ManualResetEventSlim(false);
-        private uint _signaled;
-        public override uint Requested => requested;
+        private readonly ManualResetEventSlim _signal = new(false);
+        private uint _granted;
 
-
-        public override void Signal(uint available)
+        protected override void Grant(uint granted)
         {
-            _signaled = available;
+            _granted = granted;
             _signal.Set();
         }
 
         public override void SignalDisposed()
         {
+            MarkDisposed();
             _signal.Set();
         }
 
-        public uint Wait(TimeSpan? timeout = null)
+        public uint Wait(TimeSpan timeout)
         {
-            if (!_signal.Wait(timeout ?? Timeout.InfiniteTimeSpan))
+            if (!_signal.Wait(timeout))
             {
-                throw new TimeoutException("Timeout error");
+                // If a grant raced with the timeout, prefer the grant.
+                if (!TryAbandon())
+                {
+                    _signal.Wait();
+                    return _granted;
+                }
+
+                throw new TimeoutException("Timed out waiting for send window");
             }
 
-            return _signaled > Requested ? Requested : _signaled;
+            if (Disposed)
+            {
+                throw new ObjectDisposedException(nameof(RemoteDataWindow));
+            }
+
+            return _granted;
         }
     }
 
-
-    /// <summary>
-    /// Helper class for ensuring single access 
-    /// </summary>
-    private class AsyncWaiter : Waiter
+    private sealed class AsyncWaiter : Waiter
     {
         private readonly TaskCompletionSource<uint> _finished;
-        private readonly uint _requested;
 
         public AsyncWaiter(uint requested, TimeSpan? timeout = null, CancellationToken? cancel = null)
+            : base(requested)
         {
-            // to prevent a deadlock we need to run the continuations asynchronously
+            // Run continuations asynchronously to avoid completing a caller while holding _dataLock.
             _finished = new TaskCompletionSource<uint>(TaskCreationOptions.RunContinuationsAsynchronously);
-            _requested = requested;
 
-            CancellationTokenRegistration? cancellationTokenRegistration = null;
-            CancellationTokenSource? timeOutTcs = null;
-            CancellationTokenRegistration? timeoutReg = null;
-            if (cancel != null)
+            CancellationTokenRegistration cancellationRegistration = default;
+            if (cancel is { CanBeCanceled: true } token)
             {
-                cancellationTokenRegistration = cancel.Value.Register(() =>
+                cancellationRegistration = token.Register(static state =>
                 {
-                    _finished.TrySetCanceled();
-                });
+                    var (waiter, cancellationToken) = ((AsyncWaiter, CancellationToken))state!;
+                    if (waiter.TryAbandon())
+                    {
+                        waiter._finished.TrySetCanceled(cancellationToken);
+                    }
+                }, (this, token));
             }
 
-            if (timeout != null)
+            CancellationTokenRegistration timeoutRegistration = default;
+            CancellationTokenSource? timeoutSource = null;
+            if (timeout is { } value && value > TimeSpan.Zero && value != Timeout.InfiniteTimeSpan)
             {
-                timeOutTcs = new CancellationTokenSource((int)timeout.Value.TotalMilliseconds);
-                timeOutTcs.Token.Register(() =>
+                timeoutSource = new CancellationTokenSource(value);
+                timeoutRegistration = timeoutSource.Token.Register(static state =>
                 {
-                    _finished.TrySetException(new TimeoutException("Timeout error"));
-                });
+                    var waiter = (AsyncWaiter)state!;
+                    if (waiter.TryAbandon())
+                    {
+                        waiter._finished.TrySetException(new TimeoutException("Timed out waiting for send window"));
+                    }
+                }, this);
             }
 
-            _finished.Task.ContinueWith(t =>
+            if (cancellationRegistration != default || timeoutRegistration != default)
             {
-                cancellationTokenRegistration?.Dispose();
-                timeoutReg?.Dispose();
-                timeOutTcs?.Dispose();
-            });
+                _finished.Task.ContinueWith(static (_, state) =>
+                {
+                    var (cancellation, timeoutReg, source) = ((CancellationTokenRegistration, CancellationTokenRegistration, CancellationTokenSource?))state!;
+                    cancellation.Dispose();
+                    timeoutReg.Dispose();
+                    source?.Dispose();
+                }, (cancellationRegistration, timeoutRegistration, timeoutSource), CancellationToken.None,
+                    TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+            }
         }
 
-        public override uint Requested => _requested;
-
-        public override void Signal(uint available)
+        protected override void Grant(uint granted)
         {
-            var consumed = available > Requested ? Requested : available;
-
-            _finished.SetResult(consumed);
+            _finished.TrySetResult(granted);
         }
 
-        public override void SignalDisposed() 
+        public override void SignalDisposed()
         {
-            _finished.TrySetException(new ObjectDisposedException(nameof(RemoteDataWindow)));
+            MarkDisposed();
+            if (TryAbandon())
+            {
+                _finished.TrySetException(new ObjectDisposedException(nameof(RemoteDataWindow)));
+            }
         }
 
-        public ValueTask<uint> Task => new ValueTask<uint>(_finished.Task);
+        public ValueTask<uint> Task => new(_finished.Task);
     }
 
     public void Dispose()
     {
-        if (_disposedValue) return;
+        if (_disposedValue)
+        {
+            return;
+        }
 
         lock (_dataLock)
         {
-            while (_waiters.TryDequeue(out var current)) 
+            if (_disposedValue)
+            {
+                return;
+            }
+
+            _disposedValue = true;
+            while (_waiters.TryDequeue(out var current))
             {
                 current.SignalDisposed();
             }
-            _disposedValue = true;
         }
     }
 
-    private void ThrowIfDisposed() 
+    private void ThrowIfDisposed()
     {
-        if (_disposedValue) throw new ObjectDisposedException(nameof(RemoteDataWindow));
+        if (_disposedValue)
+        {
+            throw new ObjectDisposedException(nameof(RemoteDataWindow));
+        }
     }
 }

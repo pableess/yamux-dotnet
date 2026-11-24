@@ -28,7 +28,6 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
     private readonly CancellationTokenSource _keepAliveToken;
     private readonly SessionOptions _sessionOptions;
     private volatile bool _disposed;
-    private int _isClosing;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="Session"/> class.
@@ -100,6 +99,9 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
     /// <exception cref="SessionException">Thrown when the session is in GoAway state or channels have been exhausted.</exception>
     public ValueTask<IDuplexSessionChannel> OpenChannelAsync(SessionChannelOptions options, bool waitForAcknowledgement = false, CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(options);
+        options.Validate();
+
         if (!_channelManager.CanAcceptNew)
         {
             if (_channelManager.IsRemoteGoAway)
@@ -117,27 +119,33 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
         {
             waitForAck = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-            if (cancellationToken != default)
+            if (cancellationToken.CanBeCanceled)
             {
-                var registration = cancellationToken.Register(() =>
+                var registration = cancellationToken.Register(static state =>
                 {
-                    waitForAck.TrySetCanceled(cancellationToken);
-                });
-                waitForAck.Task.ContinueWith(t =>
-                {
-                    registration.Dispose();
-                });
+                    var (session, pendingChannel, tcs, token) =
+                        ((Session, SessionChannel, TaskCompletionSource<IDuplexSessionChannel>, CancellationToken))state!;
+
+                    // If the open is still pending, fail it and release the stream.
+                    if (tcs.TrySetCanceled(token))
+                    {
+                        session.CancelPendingOpen(pendingChannel);
+                    }
+                }, (this, channel, waitForAck, cancellationToken));
+
+                waitForAck.Task.ContinueWith(static (_, state) => ((CancellationTokenRegistration)state!).Dispose(),
+                    registration, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
             }
 
             if (_sessionOptions.StreamOpenTimeout > TimeSpan.Zero)
             {
                 var timeoutCts = new CancellationTokenSource(_sessionOptions.StreamOpenTimeout);
-                timeoutCts.Token.Register(async () =>
+                timeoutCts.Token.Register(() =>
                 {
                     if (!waitForAck.Task.IsCompleted)
                     {
                         waitForAck.TrySetException(new TimeoutException("Stream open timeout exceeded"));
-                        try { await CloseAsync(); } catch { }
+                        _ = CloseAsync();
                     }
                 });
                 waitForAck.Task.ContinueWith(_ =>
@@ -149,8 +157,8 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
             _channelManager.TrackConnect(id, waitForAck);
         }
 
-        // This will send SYN frame
-        channel.SendWindowUpdate(0);
+        // Sends SYN (and the initial window increase) in a single frame.
+        channel.SendInitialWindowUpdate();
 
         if (waitForAck != null)
         {
@@ -158,7 +166,19 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
         }
 
         return ValueTask.FromResult((IDuplexSessionChannel)channel);
-           
+    }
+
+    private void CancelPendingOpen(SessionChannel channel)
+    {
+        _channelManager.FailConnect(channel.Id, accept: false);
+        try
+        {
+            channel.Dispose();
+        }
+        catch (Exception ex)
+        {
+            SessionTracer.TraceInformation("[Warn] yamux: failed to clean up canceled channel {0} - {1}", channel.Id, ex.Message);
+        }
     }
 
     /// <summary>
@@ -198,30 +218,47 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
 
     private async ValueTask<IDuplexSessionChannel> AcceptChannelAsync(SessionChannelOptions channelOptions, CancellationToken cancellationToken = default)
     {
-        try
+        while (true)
         {
-            var channel = await _channelManager.WaitForAcceptAsync(cancellationToken);
+            SessionChannel channel;
+            try
+            {
+                channel = await _channelManager.WaitForAcceptAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (ChannelClosedException)
+            {
+                throw new SessionException(SessionErrorCode.SessionShutdown, "Session has been closed");
+            }
 
             if (this.IsClosed)
             {
                 throw new SessionException(SessionErrorCode.SessionShutdown, "Session has been closed");
             }
 
+            if (channel.IsReset)
+            {
+                // The peer opened and reset the channel before the application
+                // accepted it. Skip it instead of surfacing a dead channel.
+                channel.Dispose();
+                continue;
+            }
+
             try
             {
                 channel.Accept();
+            }
+            catch (SessionChannelException) when (channel.IsReset)
+            {
+                channel.Dispose();
+                continue;
             }
             catch (SessionChannelException)
             {
                 throw new SessionException(SessionErrorCode.SessionShutdown, "Session has been closed");
             }
 
-            await channel.ApplyOptionsAsync(channelOptions, cancellationToken);
+            await channel.ApplyOptionsAsync(channelOptions, cancellationToken).ConfigureAwait(false);
             return channel;
-        }
-        catch (ChannelClosedException)
-        {
-            throw new SessionException(SessionErrorCode.SessionShutdown, "Session has been closed");
         }
     }
 
@@ -232,7 +269,7 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
     /// <returns>A <see cref="ValueTask"/> representing the asynchronous operation, with the measured round-trip time.</returns>
     public async ValueTask<TimeSpan> PingAsync(CancellationToken cancellationToken)
     {
-        return await _pingManager.PingAsync(_writer, cancellationToken);
+        return await _pingManager.PingAsync(_writer, _sessionOptions.ConnectionWriteTimeout, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -279,7 +316,9 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
     /// <returns><c>true</c> if all channels closed within the timeout; otherwise <c>false</c>.</returns>
     public async Task<bool> CloseOpenChannelsAsync(TimeSpan timeout)
     {
-        return await _channelManager.CloseOpenChannelsAsync(timeout);
+        // The documented contract is to notify the peer before draining channels.
+        await GoAwayAsync().ConfigureAwait(false);
+        return await _channelManager.CloseOpenChannelsAsync(timeout).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -304,51 +343,61 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
 
     private async Task CloseAsync(SessionException? err = null)
     {
-        if (Interlocked.CompareExchange(ref _isClosing, 1, 0) != 0)
+        if (IsClosed)
             return;
 
         await _closeLock.WaitAsync().ConfigureAwait(false);
 
         try
         {
-            if (!IsClosed)
+            if (IsClosed)
+                return;
+
+            // Cleanup is best effort: a failure in one step must not leave the
+            // session permanently "closing" without ever becoming closed.
+            try { _keepAliveToken.Cancel(); } catch (ObjectDisposedException) { }
+
+            if (_keepAlive != null)
             {
-                if (_keepAlive != null)
-                {
-                    _keepAliveToken.Cancel();
-                    await _keepAlive.ConfigureAwait(false);
-                    _keepAliveToken.Dispose();
-                    _keepAlive = null;
-                }
-
-                _channelManager.FailAllConnects(
-                    new SessionChannelException(ChannelErrorCode.SessionClosed, "The session has been closed"));
-
-                _frameReader.PrepareForClose();
-
-                if (!_leaveOpen)
-                {
-                    _transport.Close();
-                }
-
-                _frameReader.Stop();
-                await _frameReader.WaitForCompletionAsync().ConfigureAwait(false);
-
-                _channelManager.CloseAllChannels(err);
-
-                await _writer.StopAsync().ConfigureAwait(false);
-
-                if (!_leaveOpen)
-                {
-                    if (_transport is IDisposable d)
-                    {
-                        d.Dispose();
-                    }
-                }
-
-                _sessionFault.TrySetResult();
-                IsClosed = true;
+                try { await _keepAlive.ConfigureAwait(false); } catch { }
+                _keepAlive = null;
             }
+
+            _channelManager.FailAllConnects(
+                new SessionChannelException(ChannelErrorCode.SessionClosed, "The session has been closed"));
+
+            _pingManager.FailAllPings(
+                new SessionException(SessionErrorCode.SessionShutdown, "The session has been closed"));
+
+            _frameReader.PrepareForClose();
+
+            if (!_leaveOpen)
+            {
+                try { _transport.Close(); }
+                catch (Exception ex) { SessionTracer.TraceInformation("[Warn] yamux: transport close failed - {0}", ex.Message); }
+            }
+
+            try
+            {
+                _frameReader.Stop();
+                await _frameReader.WaitForCompletionAsync(_sessionOptions.SessionCloseTimeout).ConfigureAwait(false);
+            }
+            catch (Exception ex) { SessionTracer.TraceInformation("[Warn] yamux: frame reader shutdown failed - {0}", ex.Message); }
+
+            try { _channelManager.CloseAllChannels(err); }
+            catch (Exception ex) { SessionTracer.TraceInformation("[Warn] yamux: channel shutdown failed - {0}", ex.Message); }
+
+            try { await _writer.StopAsync().ConfigureAwait(false); }
+            catch (Exception ex) { SessionTracer.TraceInformation("[Warn] yamux: writer shutdown failed - {0}", ex.Message); }
+
+            if (!_leaveOpen && _transport is IDisposable d)
+            {
+                try { d.Dispose(); }
+                catch (Exception ex) { SessionTracer.TraceInformation("[Warn] yamux: transport dispose failed - {0}", ex.Message); }
+            }
+
+            _sessionFault.TrySetResult();
+            IsClosed = true;
         }
         finally
         {
@@ -362,15 +411,24 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
     /// <returns>A <see cref="ValueTask"/> representing the asynchronous dispose operation.</returns>
     public async ValueTask DisposeAsync()
     {
-        if (!_disposed)
+        if (_disposed)
+        {
+            return;
+        }
+
+        _disposed = true;
+
+        try
         {
             await CloseAsync();
-
+        }
+        finally
+        {
             Stats?.Dispose();
             Stats = null;
             Metrics?.Dispose();
 
-            _disposed = true;
+            try { _keepAliveToken.Dispose(); } catch (ObjectDisposedException) { }
         }
     }
 
@@ -385,8 +443,20 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
                     this.RTT = await PingAsync(_keepAliveToken.Token).ConfigureAwait(false);
                     Metrics?.RecordRtt(this.RTT.Value);
                 }
-                catch (Exception e) when (e is not OperationCanceledException)
+                catch (OperationCanceledException) when (_keepAliveToken.IsCancellationRequested)
                 {
+                    break;
+                }
+                catch (Exception e)
+                {
+                    // Match Go yamux: a failed keepalive is fatal for the session.
+                    SessionTracer.TraceInformation("[Err] yamux: keepalive failed - {0}", e.Message);
+                    _ = Task.Run(() => CloseAsync(new SessionException(
+                        SessionErrorCode.StreamClosed,
+                        "Keep-alive ping failed",
+                        e,
+                        SessionTermination.InternalError)));
+                    return;
                 }
 
                 await Task.Delay(_sessionOptions.KeepAliveInterval, _keepAliveToken.Token).ConfigureAwait(false);
@@ -423,6 +493,11 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
     void IChannelSessionAdapter.ChannelDisconnect(SessionChannel channel)
     {
         _channelManager.RemoveChannel(channel.Id);
+
+        // A channel that disappears before it was acknowledged must complete any
+        // pending OpenChannelAsync(waitForAcknowledgement: true) instead of waiting
+        // for the stream-open timeout.
+        _channelManager.FailConnect(channel.Id, accept: false);
     }
 
     void IChannelSessionAdapter.ChannelAcknowledge(SessionChannel channel, bool accept)

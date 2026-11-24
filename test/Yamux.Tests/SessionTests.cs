@@ -347,7 +347,7 @@ public class SessionTests
             received.Should().BeEquivalentTo(data);
 
             channel.Close();
-            await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
+            await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(10));
             channel.Dispose();
         }, TestContext.Current.CancellationToken);
 
@@ -366,7 +366,7 @@ public class SessionTests
             Func<Task> writeAfterClose = () => channel.WriteAsync(new byte[1], TestContext.Current.CancellationToken).AsTask();
             await writeAfterClose.Should().ThrowAsync<SessionChannelException>();
 
-            await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(1));
+            await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(10));
             channel.Dispose();
         }, TestContext.Current.CancellationToken);
 

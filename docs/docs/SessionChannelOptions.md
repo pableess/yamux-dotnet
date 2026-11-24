@@ -7,8 +7,8 @@ title: SessionChannelOptions
 The `SessionChannelOptions` class configures the behavior of a Yamux session channel.
 
 ## Properties
-- `uint ReceiveWindowSize` - Initial receive window size (default: 256 KB). Yamux spec default is 256 KB.
-- `uint ReceiveWindowUpperBound` - Maximum receive window size (default: 16 MiB).
+- `uint ReceiveWindowSize` - Initial receive window size (default: 256 KB, minimum: 256 KB). Yamux fixes the wire-level initial window at 256 KB; larger values are advertised immediately after the channel opens. Values below 256 KB are rejected.
+- `uint ReceiveWindowUpperBound` - Maximum receive window size (default: 16 MiB, minimum: 256 KB).
 - `uint MaxDataFrameSize` - Maximum data frame payload size (default: 16 KiB).
 - `bool AutoTuneReceiveWindowSize` - Automatically increase window size for throughput (default: true).
 - `bool EnableStatistics` - Enables statistics collection.
@@ -29,4 +29,4 @@ options.Validate();
 ```
 
 ## Exceptions
-- `ValidationException` - Thrown if options are invalid. `ReceiveWindowSize` must be at least 10 KiB, must not exceed `ReceiveWindowUpperBound` when auto-tuning is enabled, and `MaxDataFrameSize` must be greater than zero.
+- `ValidationException` - Thrown if options are invalid. `ReceiveWindowSize` and `ReceiveWindowUpperBound` must be at least 256 KB, `ReceiveWindowSize` must not exceed `ReceiveWindowUpperBound`, and `MaxDataFrameSize` must be greater than zero.
