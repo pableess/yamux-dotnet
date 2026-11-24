@@ -1,0 +1,21 @@
+// Project-local debug tasks
+//
+// For more documentation on how to configure debug tasks,
+// see: https://zed.dev/docs/debugger
+[
+  {
+    "label": "Debug samppe app (.NET 11)",
+    "adapter": "netcoredbg",
+    "request": "launch",
+    "program": "$ZED_WORKTREE_ROOT/samples/Sample/bin/Debug/net11.0/Sample.dll",
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "stopAtEntry": false,
+    "justMyCode": true
+  },
+  {
+    "label": "Attach to process",
+    "adapter": "netcoredbg",
+    "request": "attach",
+    "processId": "$ZED_PICK_PID"
+  }
+]
