@@ -140,9 +140,7 @@ internal class FrameReader
         {
             Session.SessionTracer.TraceInformation("[WARN] yamux: discarding data frame for unknown stream {0}, sending RST", frameHeader.StreamId);
 
-            _ = _writer.WriteAsync(
-                Frame.CreateWindowUpdateFrame(frameHeader.StreamId, Flags.RST, 0),
-                CancellationToken.None);
+            _writer.EnqueueFrame(Frame.CreateWindowUpdateFrame(frameHeader.StreamId, Flags.RST, 0));
 
             await ReadPayloadData(frameHeader.Length, null, token, discard: true).ConfigureAwait(false);
             return;
@@ -152,9 +150,7 @@ internal class FrameReader
         {
             Session.SessionTracer.TraceEvent(TraceEventType.Error, 0, $"[Err] yamux: incoming frame size exceeded (stream: {channel.Id}, length: {frameHeader.Length}, max: {_sessionOptions.MaxIncomingFrameSize})");
 
-            _ = _writer.WriteAsync(
-                Frame.CreateGoAwayFrame(SessionTermination.ProtocolError),
-                CancellationToken.None);
+            _writer.EnqueueFrame(Frame.CreateGoAwayFrame(SessionTermination.ProtocolError));
             throw new SessionException(SessionErrorCode.RecvWindowExceeded,
                 $"incoming frame size exceeded (stream: {channel.Id})",
                 SessionTermination.ProtocolError);
@@ -164,9 +160,7 @@ internal class FrameReader
         {
             Session.SessionTracer.TraceEvent(TraceEventType.Error, 0, $"[Err] yamux: receive window exceeded (stream: {channel.Id}, length: {frameHeader.Length})");
 
-            _ = _writer.WriteAsync(
-                Frame.CreateGoAwayFrame(SessionTermination.ProtocolError),
-                CancellationToken.None);
+            _writer.EnqueueFrame(Frame.CreateGoAwayFrame(SessionTermination.ProtocolError));
             throw new SessionException(SessionErrorCode.RecvWindowExceeded,
                 $"receive window exceeded (stream: {channel.Id})",
                 SessionTermination.ProtocolError);

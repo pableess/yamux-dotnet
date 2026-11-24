@@ -28,6 +28,7 @@ public interface ISessionChannel : IDisposable, IAsyncDisposable
     /// <summary>
     /// Gracefully closes the write side of the channel by sending a FIN frame.
     /// The read side remains open until the remote peer closes their side.
+    /// Calling this after the channel has been disposed is a no-op.
     /// </summary>
     public void Close();
 
@@ -80,6 +81,8 @@ public interface IReadOnlySessionChannel : ISessionChannel
 {
     /// <summary>
     /// Gets the <see cref="System.IO.Pipelines.PipeReader"/> for reading data from this channel.
+    /// Completing the reader indicates that the application will not read further data;
+    /// the channel is then treated as half-closed for writing.
     /// </summary>
     public PipeReader Input { get; }
 }

@@ -56,11 +56,6 @@ public class SessionOptions
     public TimeSpan SessionCloseTimeout { get; set; } = TimeSpan.FromSeconds(30);
 
     /// <summary>
-    /// The timeout for reading data from the underlying transport.
-    /// </summary>
-    public TimeSpan ReadTimeout { get; set; } = TimeSpan.FromMinutes(5);
-
-    /// <summary>
     /// Default channel options applied to newly accepted channels.
     /// </summary>
     public SessionChannelOptions DefaultChannelOptions { get; set; } = new SessionChannelOptions();

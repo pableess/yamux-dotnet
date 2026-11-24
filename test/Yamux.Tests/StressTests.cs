@@ -123,36 +123,52 @@ res = await channel.Input.ReadAsync(TestContext.Current.CancellationToken);
         byte[]? serverReceived = null;
         byte[]? clientReceived = null;
 
+        using var bothDone = new Barrier(2);
+
         var serverTask = Task.Run(async () =>
         {
-            await using var session = new Session(new StreamPeer(server), false);
-            session.Start();
-            using var channel = await session.AcceptAsync();
+            try
+            {
+                await using var session = new Session(new StreamPeer(server), false);
+                session.Start();
+                using var channel = await session.AcceptAsync();
 
-            await channel.WriteAsync(data, TestContext.Current.CancellationToken);
-            channel.Close();
+                await channel.WriteAsync(data, TestContext.Current.CancellationToken);
+                channel.Close();
 
-            var ms = new MemoryStream();
-            await channel.Input.CopyToAsync(ms, TestContext.Current.CancellationToken);
-            serverReceived = ms.ToArray();
+                var ms = new MemoryStream();
+                await channel.Input.CopyToAsync(ms, TestContext.Current.CancellationToken);
+                serverReceived = ms.ToArray();
 
-            await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(3));
+                await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(10));
+            }
+            finally
+            {
+                bothDone.SignalAndWait(TimeSpan.FromSeconds(20));
+            }
         }, TestContext.Current.CancellationToken);
 
         var clientTask = Task.Run(async () =>
         {
-            await using var session = new Session(new StreamPeer(client), true);
-            session.Start();
-            using var channel = await session.OpenChannelAsync();
+            try
+            {
+                await using var session = new Session(new StreamPeer(client), true);
+                session.Start();
+                using var channel = await session.OpenChannelAsync();
 
-            await channel.WriteAsync(data, TestContext.Current.CancellationToken);
-            channel.Close();
+                await channel.WriteAsync(data, TestContext.Current.CancellationToken);
+                channel.Close();
 
-            var ms = new MemoryStream();
-            await channel.Input.CopyToAsync(ms, TestContext.Current.CancellationToken);
-            clientReceived = ms.ToArray();
+                var ms = new MemoryStream();
+                await channel.Input.CopyToAsync(ms, TestContext.Current.CancellationToken);
+                clientReceived = ms.ToArray();
 
-            await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(3));
+                await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(10));
+            }
+            finally
+            {
+                bothDone.SignalAndWait(TimeSpan.FromSeconds(20));
+            }
         }, TestContext.Current.CancellationToken);
 
         await Task.WhenAll(serverTask, clientTask);

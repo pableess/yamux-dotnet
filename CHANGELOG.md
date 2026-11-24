@@ -19,6 +19,7 @@ All notable changes to this project will be documented in this file.
 - Channel immediately removed from `ChannelManager` on RST receipt
 - `Nerdbank.Streams` and in-memory transport benchmarks
 - New test suites: `SocketTransportTests`, `StressTests`, `ProtocolEdgeCaseTests`, `ErrorPathTests`, `ProtocolRobustnessTests`, `ResilienceTests`
+- .NET 11 target (`net11.0`) in addition to .NET 9 and .NET 10
 
 ### Fixed
 - Frame payload discard no longer reads past the current frame (frame desync)
@@ -37,11 +38,20 @@ All notable changes to this project will be documented in this file.
 - Batched writes honor `ITransport.FlushAsync` for `FlushWritesAsync`
 - Statistics count each frame once and count payload bytes consistently
 - Auto-tune uses consistent `Stopwatch`/`TimeSpan` units
+- Disposing a gracefully closed channel no longer emits a redundant RST
+- `Close`/`WhenRemoteCloseAsync` tolerate concurrent channel disposal
+- Stream ID generation detects exhaustion instead of wrapping
+- Statistics `Sampled` handler exceptions no longer escape the timer callback
+- `Session.Start` is safe against concurrent calls
+- Reduced hot-path allocations: pooled write-completion sources, a reusable batch
+  header buffer, no per-frame `ArrayPool` rent, and no linked CTS for
+  uncancellable writes
 
 ### Changed
 - **Breaking:** Renamed extension parameter `keepOpen` to `leaveOpen` (.NET convention)
 - **Breaking:** `CancellationToken? cancel` changed to `CancellationToken cancellationToken = default` on all public APIs
 - **Breaking:** `FlushWritesAsync` return type changed from `Task` to `ValueTask`
+- Removed unused `SessionOptions.ReadTimeout`; keep-alive is the supported liveness mechanism
 - `Session` constructor access changed from `internal` to `public`
 - Ping response is now awaited instead of fire-and-forget
 - `ConfigureAwait(false)` added throughout library internals

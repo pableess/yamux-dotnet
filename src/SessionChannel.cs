@@ -164,10 +164,32 @@ internal class SessionChannel : IDuplexSessionChannel
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        var writeClosedToken = _writeClosedCancellation.Token;
+        if (_disposed)
+        {
+            throw new SessionChannelException(ChannelErrorCode.ChannelClosed, "Channel has been closed.");
+        }
 
-        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, writeClosedToken);
-        var linkedToken = linkedCts.Token;
+        CancellationToken writeClosedToken;
+        try
+        {
+            writeClosedToken = _writeClosedCancellation.Token;
+        }
+        catch (ObjectDisposedException ex)
+        {
+            throw new SessionChannelException(ChannelErrorCode.ChannelClosed, "Channel has been closed.", ex);
+        }
+
+        CancellationTokenSource? linkedCts = null;
+        CancellationToken linkedToken;
+        if (cancellationToken.CanBeCanceled)
+        {
+            linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, writeClosedToken);
+            linkedToken = linkedCts.Token;
+        }
+        else
+        {
+            linkedToken = writeClosedToken;
+        }
 
         bool gateAcquired = false;
 
@@ -238,6 +260,8 @@ internal class SessionChannel : IDuplexSessionChannel
             {
                 _writeGate.Release();
             }
+
+            linkedCts?.Dispose();
         }
     }
 
@@ -251,7 +275,8 @@ internal class SessionChannel : IDuplexSessionChannel
         if (_disposed)
             return;
 
-        _writeClosedCancellation.Cancel();
+        try { _writeClosedCancellation.Cancel(); }
+        catch (ObjectDisposedException) { }
 
         lock (_stateLock)
         {
@@ -267,13 +292,25 @@ internal class SessionChannel : IDuplexSessionChannel
 
     public void Close()
     {
-        this.ThrowIfDisposed();
+        // Closing a channel that was already disposed (for example because the
+        // session closed concurrently) is a no-op rather than an error.
+        if (_disposed)
+        {
+            return;
+        }
+
         this.CloseWrite();
     }
 
     public async Task<bool> WhenRemoteCloseAsync(TimeSpan timeout)
     {
-        this.ThrowIfDisposed();
+        // Do not throw if the channel was disposed: disposal completes the
+        // remote-close task, so the caller can still observe that the channel
+        // is closed.
+        if (_remoteCloseTask.Task.IsCompleted)
+        {
+            return true;
+        }
 
         var task = await Task.WhenAny(_remoteCloseTask.Task, Task.Delay(timeout));
         return task == _remoteCloseTask.Task;
@@ -281,7 +318,18 @@ internal class SessionChannel : IDuplexSessionChannel
 
     public async Task<bool> WhenRemoteAckAsync(TimeSpan timeout)
     {
-        this.ThrowIfDisposed();
+        if (_remoteAckTask.Task.IsCompleted)
+        {
+            return true;
+        }
+
+        // A disposed channel that was never acknowledged will never be
+        // acknowledged; report that instead of throwing ObjectDisposedException.
+        if (_disposed)
+        {
+            return false;
+        }
+
         var task = await Task.WhenAny(_remoteAckTask.Task, Task.Delay(timeout));
         return task == _remoteAckTask.Task;
     }
@@ -298,6 +346,12 @@ internal class SessionChannel : IDuplexSessionChannel
 
                 CancelCloseTimeout();
 
+                // A fully and gracefully closed channel (FIN sent and FIN received)
+                // does not need a RST on disposal.
+                bool graceful = _remoteState >= ChannelRemoteState.ReadClosed
+                    && _localPhase >= ChannelLocalPhase.WriteClosed;
+                bool sendReset = !graceful && _remoteState != ChannelRemoteState.Reset;
+
                 if (_remoteState < ChannelRemoteState.ReadClosed)
                 {
                     _localPhase = ChannelLocalPhase.WriteClosed;
@@ -306,7 +360,10 @@ internal class SessionChannel : IDuplexSessionChannel
                     _remoteCloseTask.TrySetResult();
                 }
 
-                this.SendWindowUpdate(0, (Flags)Flags.RST);
+                if (sendReset)
+                {
+                    this.SendWindowUpdate(0, (Flags)Flags.RST);
+                }
 
                 this._session.ChannelDisconnect(this);
 

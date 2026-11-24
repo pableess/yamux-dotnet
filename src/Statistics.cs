@@ -101,7 +101,15 @@ public class Statistics : IDisposable
             _currentSendBandwidth = bytesSent / SampleInterval.TotalSeconds;
             _currentReceiveBandwidth = bytesReceived / SampleInterval.TotalSeconds;
 
-            Sampled?.Invoke(this, EventArgs.Empty);
+            try
+            {
+                Sampled?.Invoke(this, EventArgs.Empty);
+            }
+            catch
+            {
+                // A consumer exception must not escape a timer callback and crash
+                // the process; statistics are best effort.
+            }
         }
     }
 

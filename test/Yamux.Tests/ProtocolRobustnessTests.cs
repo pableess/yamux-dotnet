@@ -1,4 +1,5 @@
 using System.IO.Pipelines;
+using System.Reflection;
 using System.Text;
 using AwesomeAssertions;
 using Yamux.Protocol;
@@ -287,5 +288,78 @@ public class ProtocolRobustnessTests
         Func<Task> act = async () => await session.OpenChannelAsync(invalid, cancellationToken: CancellationToken);
 
         await act.Should().ThrowAsync<System.ComponentModel.DataAnnotations.ValidationException>();
+    }
+
+    [Fact]
+    public void StreamIdGenerator_ThrowsWhenExhausted()
+    {
+        var generator = new Yamux.Internal.StreamIdGenerator(even: false);
+        var seedField = typeof(Yamux.Internal.StreamIdGenerator)
+            .GetField("_seed", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        seedField.SetValue(generator, uint.MaxValue - 1);
+
+        Action act = () => generator.Next();
+
+        act.Should().Throw<InvalidOperationException>();
+    }
+
+    [Fact]
+    public async Task DisposeAfterGracefulClose_DoesNotSendReset()
+    {
+        await using var peer = new RawYamuxPeer(isClient: false);
+
+        await Wire.WriteFrameAsync(peer.Write, FrameType.WindowUpdate, Flags.SYN, 1, 0, cancellationToken: CancellationToken);
+        using var channel = await peer.Session.AcceptAsync(CancellationToken);
+
+        var ack = await Wire.ReadFrameHeaderAsync(peer.Read, CancellationToken);
+        ack.Flags.HasFlag(Flags.ACK).Should().BeTrue();
+
+        channel.Close();
+        var fin = await ReadUntilAsync(peer.Read, h => h.StreamId == 1 && h.Flags.HasFlag(Flags.FIN));
+        fin.Flags.HasFlag(Flags.FIN).Should().BeTrue();
+
+        await Wire.WriteFrameAsync(peer.Write, FrameType.WindowUpdate, Flags.FIN, 1, 0, cancellationToken: CancellationToken);
+        (await channel.WhenRemoteCloseAsync(TimeSpan.FromSeconds(2))).Should().BeTrue();
+
+        channel.Dispose();
+
+        // Barrier: the ping reply is enqueued after any frame Dispose produced.
+        await Wire.WriteFrameAsync(peer.Write, FrameType.Ping, Flags.SYN, 0, 0x55, cancellationToken: CancellationToken);
+        while (true)
+        {
+            var header = await Wire.ReadFrameHeaderAsync(peer.Read, CancellationToken);
+            if (header.FrameType == FrameType.Ping && header.Flags.HasFlag(Flags.ACK) && header.Length == 0x55)
+            {
+                break;
+            }
+
+            header.Flags.HasFlag(Flags.RST).Should().BeFalse("a gracefully closed channel must not be reset on dispose");
+        }
+    }
+
+    [Fact]
+    public async Task WriteAfterDispose_ThrowsSessionChannelException()
+    {
+        await using var peer = new RawYamuxPeer(isClient: true);
+        var channel = await peer.Session.OpenChannelAsync(cancellationToken: CancellationToken);
+
+        channel.Dispose();
+
+        Func<Task> write = async () => await channel.WriteAsync(new byte[1], CancellationToken);
+
+        await write.Should().ThrowAsync<SessionChannelException>();
+    }
+
+    private static async Task<FrameHeader> ReadUntilAsync(
+        PipeReader reader, Func<FrameHeader, bool> predicate)
+    {
+        while (true)
+        {
+            var header = await Wire.ReadFrameHeaderAsync(reader, CancellationToken);
+            if (predicate(header))
+            {
+                return header;
+            }
+        }
     }
 }

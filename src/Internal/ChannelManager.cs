@@ -51,7 +51,7 @@ internal class ChannelManager
             if (flags.HasFlag(Flags.SYN))
             {
                 Session.SessionTracer.TraceEvent(TraceEventType.Error, 0, $"[Err] yamux: duplicate stream declared: {id}");
-                await writer.WriteAsync(Frame.CreateWindowUpdateFrame(id, Flags.RST, 0), cancellationToken).ConfigureAwait(false);
+                writer.EnqueueFrame(Frame.CreateWindowUpdateFrame(id, Flags.RST, 0));
                 return null;
             }
             return channel;
@@ -70,13 +70,13 @@ internal class ChannelManager
 
             if (reject)
             {
-                await writer.WriteAsync(Frame.CreateWindowUpdateFrame(id, Flags.RST, 0), cancellationToken).ConfigureAwait(false);
+                writer.EnqueueFrame(Frame.CreateWindowUpdateFrame(id, Flags.RST, 0));
                 return null;
             }
 
             if (_channels.Count >= _maxChannels)
             {
-                await writer.WriteAsync(Frame.CreateWindowUpdateFrame(id, Flags.RST, 0), cancellationToken).ConfigureAwait(false);
+                writer.EnqueueFrame(Frame.CreateWindowUpdateFrame(id, Flags.RST, 0));
                 return null;
             }
 
@@ -88,7 +88,7 @@ internal class ChannelManager
             if (!_acceptQueue.Writer.TryWrite(newChannel))
             {
                 _channels.TryRemove(id, out _);
-                await writer.WriteAsync(Frame.CreateWindowUpdateFrame(id, Flags.RST, 0), cancellationToken).ConfigureAwait(false);
+                writer.EnqueueFrame(Frame.CreateWindowUpdateFrame(id, Flags.RST, 0));
                 return null;
             }
 

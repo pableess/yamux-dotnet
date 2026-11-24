@@ -1,13 +1,7 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-
-namespace Yamux.Internal;
+﻿namespace Yamux.Internal;
 
 /// <summary>
-/// Generates sequential ids either as even or odd numbers, starting at 1.  0 is reserved
+/// Generates sequential stream ids either as even or odd numbers. 0 is reserved.
 /// </summary>
 class StreamIdGenerator
 {
@@ -20,15 +14,15 @@ class StreamIdGenerator
 
     public uint Next()
     {
-        try
-        {
+        var value = Interlocked.Add(ref _seed, 2);
 
-            var value = checked(Interlocked.Add(ref _seed, 2));
-            return value - 1;
-        }
-        catch (OverflowException)
+        // Interlocked.Add performs the addition unchecked, so detect wraparound
+        // manually before handing out an id that may collide with an existing stream.
+        if (value <= 1)
         {
             throw new InvalidOperationException("Streams exhausted");
         }
+
+        return value - 1;
     }
 }

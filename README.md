@@ -3,7 +3,7 @@
 [![NuGet](https://img.shields.io/nuget/v/Yamux.svg)](https://www.nuget.org/packages/Yamux)
 [![NuGet Downloads](https://img.shields.io/nuget/dt/Yamux.svg)](https://www.nuget.org/packages/Yamux)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![.NET](https://img.shields.io/badge/.NET-9.0%20|%2010.0-512BD4)](https://dotnet.microsoft.com/)
+[![.NET](https://img.shields.io/badge/.NET-9.0%20|%2010.0%20|%2011.0-512BD4)](https://dotnet.microsoft.com/)
 [![AOT Compatible](https://img.shields.io/badge/AOT-compatible-green)](https://learn.microsoft.com/dotnet/core/deploying/native-aot/)
 
 <picture>

@@ -1,4 +1,5 @@
 ﻿using System.Buffers;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Threading.Channels;
 using Yamux.Protocol;
@@ -18,6 +19,8 @@ internal class SessionFrameWriter
 
     private readonly SemaphoreSlim _flushLock = new SemaphoreSlim(1, 1);
     private readonly Stack<WriteSegment> _segmentPool = new();
+    private readonly ConcurrentQueue<ResettableValueTaskSource> _sourcePool = new();
+    private byte[] _batchHeaderBuffer = new byte[4 * 1024];
 
     internal void SetMetrics(YamuxMetrics? metrics) => _metrics = metrics;
 
@@ -125,6 +128,8 @@ internal class SessionFrameWriter
                 long payloadBytes = 0;
                 int totalBytes = 0;
                 bool sawFlushMarker = false;
+                byte[] headerStorage = _batchHeaderBuffer;
+                int headerOffset = 0;
 
                 while (_writeQueue.Reader.TryRead(out var item))
                 {
@@ -140,13 +145,22 @@ internal class SessionFrameWriter
                     if (Session.SessionTracer.Switch.ShouldTrace(TraceEventType.Verbose))
                         Session.SessionTracer.TraceEvent(TraceEventType.Verbose, 0, "[Dbg] yamux: writing frame - {0}, payload size = {1}", item.Frame.Header.FrameType, item.Frame.Header.Length);
 
-                    using var _ = item.Frame;
-                    var hdrBuf = ArrayPool<byte>.Shared.Rent(FrameHeader.FrameHeaderSize);
-                    item.Frame.Header.WriteTo(hdrBuf);
+                    // Reuse one header buffer per batch (and grow it if needed)
+                    // instead of renting a tiny array for every frame.
+                    if (headerOffset + FrameHeader.FrameHeaderSize > headerStorage.Length)
+                    {
+                        int newSize = Math.Max(headerStorage.Length * 2, headerOffset + FrameHeader.FrameHeaderSize);
+                        var newBuffer = new byte[newSize];
+                        Array.Copy(headerStorage, newBuffer, headerOffset);
+                        headerStorage = newBuffer;
+                        _batchHeaderBuffer = newBuffer;
+                    }
+
+                    item.Frame.Header.WriteTo(headerStorage.AsSpan(headerOffset, FrameHeader.FrameHeaderSize));
                     var hdrSeg = RentSegment();
-                    hdrSeg.Set(hdrBuf.AsMemory(0, FrameHeader.FrameHeaderSize), runningIndex);
-                    hdrSeg.HeaderBuffer = hdrBuf;
+                    hdrSeg.Set(headerStorage.AsMemory(headerOffset, FrameHeader.FrameHeaderSize), runningIndex);
                     AppendSegment(ref head, ref tail, hdrSeg);
+                    headerOffset += FrameHeader.FrameHeaderSize;
                     runningIndex += FrameHeader.FrameHeaderSize;
                     totalBytes += FrameHeader.FrameHeaderSize;
 
@@ -219,14 +233,23 @@ internal class SessionFrameWriter
                     }
                     else
                     {
-                        if (batchError != null)
+                        try
                         {
-                            item.Fault(batchError);
+                            if (batchError != null)
+                            {
+                                item.Fault(batchError);
+                            }
+                            else
+                            {
+                                _metrics?.FrameSent();
+                                item.Complete();
+                            }
                         }
-                        else
+                        finally
                         {
-                            _metrics?.FrameSent();
-                            item.Complete();
+                            // Keep the frame (and any payload owner) alive until the
+                            // batched transport write has completed.
+                            item.Frame.Dispose();
                         }
                     }
                 }
@@ -244,25 +267,48 @@ internal class SessionFrameWriter
 
     public async ValueTask WriteAsync(Frame frame, CancellationToken cancellationToken)
     {
-        var source = new ResettableValueTaskSource();
+        var source = RentSource();
         var completionTask = source.GetValueTask();
         var item = new WriteItem(frame, source);
+        bool enqueued = false;
 
         if (Session.SessionTracer.Switch.ShouldTrace(TraceEventType.Verbose))
             Session.SessionTracer.TraceEvent(TraceEventType.Verbose, 0, "[Dbg] yamux: Enqueuing frame for write - {0}, payload size = {1}", frame.Header.FrameType, frame.Header.Length);
 
-        await _writeQueue.Writer.WriteAsync(item, cancellationToken)
-            .AsTask()
-            .WaitAsync(_connectionWriteTimeout, cancellationToken)
-            .ConfigureAwait(false);
+        try
+        {
+            // Fast path avoids allocating a task for the queue write.
+            if (_writeQueue.Writer.TryWrite(item))
+            {
+                enqueued = true;
+            }
+            else
+            {
+                await _writeQueue.Writer.WriteAsync(item, cancellationToken)
+                    .AsTask()
+                    .WaitAsync(_connectionWriteTimeout, cancellationToken)
+                    .ConfigureAwait(false);
+                enqueued = true;
+            }
 
-        if (Session.SessionTracer.Switch.ShouldTrace(TraceEventType.Verbose))
-            Session.SessionTracer.TraceEvent(TraceEventType.Verbose, 0, "[Dbg] yamux: Frame enqueued for write - {0}, payload size = {1}", frame.Header.FrameType, frame.Header.Length);
+            if (Session.SessionTracer.Switch.ShouldTrace(TraceEventType.Verbose))
+                Session.SessionTracer.TraceEvent(TraceEventType.Verbose, 0, "[Dbg] yamux: Frame enqueued for write - {0}, payload size = {1}", frame.Header.FrameType, frame.Header.Length);
 
-        await completionTask.ConfigureAwait(false);
+            await completionTask.ConfigureAwait(false);
 
-        if (Session.SessionTracer.Switch.ShouldTrace(TraceEventType.Verbose))
-            Session.SessionTracer.TraceEvent(TraceEventType.Verbose, 0, "[Dbg] yamux: Write completed for frame - {0}, payload size = {1}", frame.Header.FrameType, frame.Header.Length);
+            if (Session.SessionTracer.Switch.ShouldTrace(TraceEventType.Verbose))
+                Session.SessionTracer.TraceEvent(TraceEventType.Verbose, 0, "[Dbg] yamux: Write completed for frame - {0}, payload size = {1}", frame.Header.FrameType, frame.Header.Length);
+        }
+        finally
+        {
+            // The writer is done with the source once the completion task has
+            // completed (successfully or not). If enqueueing failed, the item may
+            // still be referenced by the queue, so let it be collected instead.
+            if (enqueued)
+            {
+                ReturnSource(source);
+            }
+        }
     }
 
     public void EnqueueFrame(Frame frame)
@@ -339,13 +385,24 @@ internal class SessionFrameWriter
 
     private void ReturnSegment(WriteSegment seg)
     {
-        if (seg.HeaderBuffer != null)
-        {
-            ArrayPool<byte>.Shared.Return(seg.HeaderBuffer);
-            seg.HeaderBuffer = null;
-        }
         seg.Reset();
         _segmentPool.Push(seg);
+    }
+
+    private ResettableValueTaskSource RentSource()
+    {
+        if (_sourcePool.TryDequeue(out var source))
+        {
+            source.Reset();
+            return source;
+        }
+
+        return new ResettableValueTaskSource();
+    }
+
+    private void ReturnSource(ResettableValueTaskSource source)
+    {
+        _sourcePool.Enqueue(source);
     }
 
     private static void AppendSegment(ref WriteSegment? head, ref WriteSegment? tail, WriteSegment seg)
@@ -370,14 +427,11 @@ internal class SessionFrameWriter
 
     private sealed class WriteSegment : ReadOnlySequenceSegment<byte>
     {
-        public byte[]? HeaderBuffer { get; set; }
-
         public WriteSegment Set(ReadOnlyMemory<byte> memory, long runningIndex)
         {
             Memory = memory;
             RunningIndex = runningIndex;
             Next = null;
-            HeaderBuffer = null;
             return this;
         }
 

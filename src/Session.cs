@@ -23,11 +23,12 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
     private readonly bool _leaveOpen;
 
     private Task? _keepAlive;
-    private bool _started;
+    private int _started;
 
     private readonly CancellationTokenSource _keepAliveToken;
     private readonly SessionOptions _sessionOptions;
     private volatile bool _disposed;
+    private volatile bool _isClosed;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="Session"/> class.
@@ -284,24 +285,30 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
         if (IsClosed)
             throw new SessionException(SessionErrorCode.SessionShutdown, "Session has been closed.");
 
-        if (_started)
+        if (Interlocked.Exchange(ref _started, 1) != 0)
             return;
 
-        _writer.Start();
-        _frameReader.Start();
-
-        if (_sessionOptions.EnableKeepAlive)
+        try
         {
-            _keepAlive = KeepAlive();
-        }
+            _writer.Start();
+            _frameReader.Start();
 
-        _started = true;
+            if (_sessionOptions.EnableKeepAlive)
+            {
+                _keepAlive = KeepAlive();
+            }
+        }
+        catch
+        {
+            _started = 0;
+            throw;
+        }
     }
 
     /// <summary>
     /// Gets whether the session has been closed.
     /// </summary>
-    public bool IsClosed { get; private set; }
+    public bool IsClosed => _isClosed;
 
     /// <summary>
     /// Gracefully closes the session, draining all open channels before disposing the transport.
@@ -397,7 +404,7 @@ public sealed class Session : IChannelSessionAdapter, IAsyncDisposable
             }
 
             _sessionFault.TrySetResult();
-            IsClosed = true;
+            _isClosed = true;
         }
         finally
         {
