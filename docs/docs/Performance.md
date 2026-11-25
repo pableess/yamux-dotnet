@@ -73,51 +73,21 @@ MB/s; 1 MB = 1024² bytes. Higher is better.
 At 50 MB the picture is similar: C# yamux split is 1,217 / 1,358 / 1,689 MB/s
 for 1 / 5 / 20 streams, C# → Go is 1,323 / 1,502 / 1,685 MB/s, and Go ↔ Go is
 811 / 1,109 / 1,265 MB/s. The 1 MB results are dominated by connection and
-session setup; see the raw reports in `benchmarks/results/`.
+session setup; the suite includes them for trend, not bandwidth.
 
-### Receive-path optimization
+### Receive path
 
-The first version of this comparison showed a clear asymmetry: the C# sender
-was fast (C# → Go was the best multiplexed result), but the C# **receiver** was
-up to 1.7× slower than the Go receiver at the same payload (20 streams).
+Frame payloads are read directly into each channel's `System.IO.Pipelines`
+buffer. The reader requests up to 64 KB per socket read, so a typical 32 KB
+yamux frame is read with one receive call instead of being split across eight
+4 KB pipe segments. The payload is then handed to the channel's pipe without
+another copy.
 
-The cause was in `FrameReader.ReadPayloadData`: it called
-`PipeWriter.GetMemory()` with no size hint. `PipeOptions` defaults to a 4 KB
-segment, so a 32 KB frame was read with eight socket receives, eight pipe
-flushes, and eight reader wake-ups. Go reads the whole frame payload in one
-`conn.Read`. The receive loop now requests up to 64 KB per read:
-
-```csharp
-var buffer = pipeWriter.GetMemory((int)Math.Min(remaining, MaxPayloadReadSize));
-```
-
-Effect at 500 MB (MB/s):
-
-| Topology | Streams | Before | After | Change |
-|---|---:|---:|---:|---:|
-| C# yamux in-proc | 1 | 1,059 | 1,336 | +26% |
-| C# yamux in-proc | 5 | 1,164 | 1,380 | +19% |
-| C# yamux in-proc | 20 | 1,229 | 1,438 | +17% |
-| C# yamux split | 1 | 986 | 1,227 | +24% |
-| C# yamux split | 5 | 1,138 | 1,330 | +17% |
-| C# yamux split | 20 | 1,158 | 1,465 | +27% |
-| In-memory pipes | 1 | 4,365 | 6,387 | +46% |
-| In-memory pipes | 5 | 3,904 | 6,332 | +62% |
-| In-memory pipes | 20 | 3,093 | 5,998 | +94% |
-| C# → Go (control) | 20 | 1,954 | 1,913 | −2% |
-| Raw TCP (control) | 20 | 2,574 | 2,511 | −2% |
-
-The two controls are unchanged, which isolates the improvement to the C#
-receive path. The in-process allocation for 500 MB also dropped from ~26–28 MB
-to ~22–24 MB (both peers counted).
-
-After the fix, C# yamux is competitive with Go yamux in the matched
-in-process topology: 1,438 vs 1,232 MB/s at 20 streams (+17%). In the split
-topology, C# → Go (1,913 MB/s) is still faster than C# → C# (1,465 MB/s),
-which isolates the remaining receive-side gap to about 25% at 20 streams:
-the Go server consumes data faster than the C# server even after the fix. At
-1 and 5 streams the split numbers are within 6% and 12% respectively, so the
-residual gap grows with per-stream concurrency (dispatch and wake-up cost).
+At 500 MB / 20 streams, the C# server (split topology) reaches 1,465 MB/s
+versus 1,913 MB/s for the Go server with the same C# client. At 1 and 5
+streams the split numbers are within 6% and 12%, so the remaining gap is
+concentrated at high concurrency, consistent with per-stream dispatch and
+wake-up costs.
 
 ### Allocation per 500 MB
 
@@ -142,14 +112,15 @@ the same range as yamux.
 
 ### Interpretation
 
-- **This implementation is no longer slower than Go yamux.** In the matched
+- **This implementation is competitive with Go yamux.** In the matched
   in-process topology, C# yamux is 17–19% faster at 500 MB and 30–60% faster
   at 50 MB. The C# send path also drives C# → Go to 1.3–1.9 GB/s, the fastest
   multiplexed TCP result.
-- **The receiver was the weak point, and the gap is now small.** Reading whole
-  frames instead of 4 KB chunks recovered 17–27% on TCP and 46–94% in memory.
-  The remaining ~25% gap to the Go server at 20 streams is likely per-stream
-  dispatch and wake-up overhead rather than raw copy or syscall cost.
+- **The receive path is fast but still has headroom at high concurrency.**
+  C# yamux reaches 1,227–1,465 MB/s in the split topology. With the same C#
+  client, the Go server reaches 1,313–1,913 MB/s; the gap is 6% at 1 stream,
+  12% at 5, and ~25% at 20, consistent with per-stream dispatch and wake-up
+  cost rather than copy or syscall cost.
 - **Nerdbank v3's cost is flow-control processing, not window size.** Going
   from 256 KB to its 1 MB default changes throughput by less than 3%
   (511–536 MB/s). That is about 36–43% of C# yamux split with the same
@@ -174,10 +145,8 @@ the same range as yamux.
 
 - Single machine, loopback, one run. Run the suite multiple times before
   quoting absolute numbers; treat differences under ~10% as noise.
-- The before/after receive-path runs were separate runs about two hours apart.
-  The C# → Go and raw TCP controls changed by ≤3%, so the improvement is
-  attributable to the change, but thermal or background load can still move
-  individual results.
+- Results are a snapshot of the implementation and environment above; rerun
+  the suite after significant changes before comparing absolute numbers.
 - Both peers are warm. Cold-start and TLS handshake behavior are not measured.
 - Every reader drains as fast as possible. This does not exercise slow-consumer
   backpressure, head-of-line blocking, or memory growth under a stalled
@@ -224,7 +193,7 @@ the same range as yamux.
 dotnet run -c Release --project benchmarks/Yamux.Benchmark
 ```
 
-Run the full leveled comparison (Go baseline, raw TCP, C#↔C#, C#→Go,
+Run the full comparison (Go baseline, raw TCP, C#↔C#, C#→Go,
 Nerdbank) on Linux or macOS:
 
 ```bash
@@ -245,15 +214,15 @@ pwsh benchmarks/compare.ps1 -Tfm net11.0
 
 The script builds `benchmarks/go-server`, `benchmarks/go-benchmark`, and
 `benchmarks/Yamux.Benchmark.Server`, prints the Go baseline, then runs the
-`YamuxBenchmarks` and `NerdbankBenchmarks` BenchmarkDotNet filters. Raw reports
-from the run in this document are checked in under `benchmarks/results/`.
+`YamuxBenchmarks` and `NerdbankBenchmarks` BenchmarkDotNet filters.
+BenchmarkDotNet writes reports to `BenchmarkDotNet.Artifacts/results`.
 
 ## Allocation characteristics
 
 - Receive path uses `System.IO.Pipelines` for low-allocation buffering.
 - Payload reads request up to 64 KB from the channel pipe, so a normal frame is
-  read with one socket receive rather than the pipe's 4 KB default. Do not
-  regress `FrameReader.ReadPayloadData` to a no-argument `GetMemory()`.
+  read with one socket receive rather than the pipe's 4 KB default segment
+  size.
 - `SessionFrameWriter` pools `ResettableValueTaskSource` instances for frame
   completion and reuses one growable header buffer per batch. There is no
   per-frame `ArrayPool` rent for headers.
