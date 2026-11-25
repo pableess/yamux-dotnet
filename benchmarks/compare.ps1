@@ -16,20 +16,23 @@ try {
     Pop-Location
 }
 
+Write-Host "=== Building the persistent C# benchmark server ===" -ForegroundColor Cyan
+dotnet build -c Release -f $Tfm -o (Join-Path $bin "csharp-server") `
+    (Join-Path $root "Yamux.Benchmark.Server\Yamux.Benchmark.Server.csproj")
+
 Write-Host ""
-Write-Host "=== Go yamux (Go client -> Go server) ===" -ForegroundColor Cyan
+Write-Host "=== Go yamux (Go client -> Go server, in-process) ===" -ForegroundColor Cyan
 & (Join-Path $bin "go-benchmark.exe")
 
 $project = Join-Path $root "Yamux.Benchmark\Yamux.Benchmark.csproj"
 
 Write-Host ""
-Write-Host "=== C# yamux (C# client -> C# server, TCP) ===" -ForegroundColor Cyan
-dotnet run -c Release --framework $Tfm --project $project -- --filter '*CsharpToCsharp*'
+Write-Host "=== C# yamux (raw TCP, in-process, split C#, split Go, memory) ===" -ForegroundColor Cyan
+dotnet run -c Release --framework $Tfm --project $project -- --filter '*YamuxBenchmarks*'
 
 Write-Host ""
-Write-Host "=== C# yamux (C# client -> Go server) ===" -ForegroundColor Cyan
-dotnet run -c Release --framework $Tfm --project $project -- --filter '*GoIntegration*'
+Write-Host "=== Nerdbank.Streams (split TCP and memory, v1 vs backpressured v3) ===" -ForegroundColor Cyan
+dotnet run -c Release --framework $Tfm --project $project -- --filter '*NerdbankBenchmarks*'
 
 Write-Host ""
-Write-Host "Other C#-to-C# benchmarks: TcpYamuxAsync (server-initiated channels) and MemoryYamuxAsync (in-memory pipes)." -ForegroundColor Gray
-Write-Host "Use BenchmarkDotNet's tables for the C# results and the Go table for the Go baseline." -ForegroundColor Gray
+Write-Host "Results are written to BenchmarkDotNet.Artifacts\results." -ForegroundColor Gray

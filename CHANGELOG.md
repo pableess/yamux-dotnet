@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+
+- Reworked the benchmark harness so every pair uses the same total payload, 32 KB writes, 256 KB receive windows, keep-alive off, client-initiated channels, and a matching process topology
+- Added `benchmarks/Yamux.Benchmark.Server`, a long-lived peer that keeps process startup and JIT out of the measured method
+- Go↔Go, C#→C#, C#→Go, and Nerdbank runs now share one workload definition; the Go baseline no longer transfers `Streams` times more data
+- Added Nerdbank.Streams v1 (no backpressure) and v3 (256 KB and 1 MB windows) comparisons
+
+### Fixed
+
+- Frame payloads are now read in up to 64 KB chunks instead of the input pipe's 4 KB default, removing seven socket receives and pipe flushes per 32 KB frame (+17–27% TCP receive throughput and +46–94% in-memory throughput in the benchmark suite)
+
 ## [0.1.0-rc1] - 2026-11-24
 
 ### Added

@@ -6,6 +6,7 @@
   </Folder>
   <Folder Name="/benchmarks/">
     <Project Path="benchmarks/Yamux.Benchmark/Yamux.Benchmark.csproj" />
+    <Project Path="benchmarks/Yamux.Benchmark.Server/Yamux.Benchmark.Server.csproj" />
   </Folder>
   <Folder Name="/samples/">
     <Project Path="samples/FileTransfer/FileTransfer.csproj" />

@@ -4,13 +4,13 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
+	"sync"
 	"time"
 
 	"github.com/hashicorp/yamux"
 )
 
-const dataChunkSize = 32 * 1024 // 32KB, matching C# benchmark
+const dataChunkSize = 32 * 1024 // 32KB application writes, matching the C# harness
 
 type result struct {
 	Label    string
@@ -40,7 +40,6 @@ func main() {
 		}
 	}
 
-	// Print results table
 	fmt.Printf("\n%-20s %5s %8s %12s %10s\n", "Method", "MBs", "Streams", "Duration", "MB/s")
 	fmt.Println("-------------------------------------------------------------")
 	for _, r := range results {
@@ -48,8 +47,20 @@ func main() {
 	}
 }
 
+// chunksForStream distributes totalChunks across streams as evenly as possible.
+func chunksForStream(totalChunks, streams, index int) int {
+	n := totalChunks / streams
+	if index < totalChunks%streams {
+		n++
+	}
+	return n
+}
+
+// runRawTCP measures one TCP byte stream carrying the same total payload as
+// the multiplexed benchmarks. Raw TCP has no streams, so the streams parameter
+// only scales the reported total.
 func runRawTCP(mbs, streams int) (result, error) {
-	totalMB := mbs * streams
+	totalBytes := mbs * 1024 * 1024
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -67,7 +78,6 @@ func runRawTCP(mbs, streams int) (result, error) {
 		defer conn.Close()
 		listener.Close()
 
-		totalBytes := totalMB * 1024 * 1024
 		buf := make([]byte, dataChunkSize)
 		written := 0
 		for written < totalBytes {
@@ -84,13 +94,13 @@ func runRawTCP(mbs, streams int) (result, error) {
 		serverErr <- nil
 	}()
 
+	// Match the C# harness, where the connection is part of the measured method.
+	start := time.Now()
 	conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
 		return result{}, err
 	}
 
-	start := time.Now()
-	totalBytes := totalMB * 1024 * 1024
 	buf := make([]byte, dataChunkSize)
 	read := 0
 	for read < totalBytes {
@@ -108,7 +118,7 @@ func runRawTCP(mbs, streams int) (result, error) {
 		return result{}, err
 	}
 
-	mbps := float64(totalMB) / elapsed.Seconds()
+	mbps := float64(mbs) / elapsed.Seconds()
 	return result{
 		Label:    "GoRawTCP",
 		MBs:      mbs,
@@ -119,7 +129,7 @@ func runRawTCP(mbs, streams int) (result, error) {
 }
 
 func runGoYamux(mbs, streams int) (result, error) {
-	totalMB := mbs * streams
+	totalChunks := mbs * 1024 * 1024 / dataChunkSize
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -128,6 +138,8 @@ func runGoYamux(mbs, streams int) (result, error) {
 	port := listener.Addr().(*net.TCPAddr).Port
 
 	serverErr := make(chan error, 1)
+	streamDrained := make(chan struct{}, streams)
+
 	go func() {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -141,32 +153,37 @@ func runGoYamux(mbs, streams int) (result, error) {
 		config.EnableKeepAlive = false
 		session, err := yamux.Server(conn, config)
 		if err != nil {
+			conn.Close()
 			serverErr <- err
 			return
 		}
 
-		// Accept streams and drain them
-		done := make(chan struct{}, streams)
+		var drains sync.WaitGroup
+		acceptErr := error(nil)
 		for i := 0; i < streams; i++ {
 			stream, err := session.AcceptStream()
 			if err != nil {
-				serverErr <- err
-				return
+				acceptErr = err
+				break
 			}
+
+			drains.Add(1)
 			go func(s *yamux.Stream) {
-				io.CopyBuffer(io.Discard, s, make([]byte, dataChunkSize))
+				defer drains.Done()
+				_, _ = io.CopyBuffer(io.Discard, s, make([]byte, dataChunkSize))
 				s.Close()
-				done <- struct{}{}
+				streamDrained <- struct{}{}
 			}(stream)
 		}
 
-		// Wait for all streams to finish
-		for i := 0; i < streams; i++ {
-			<-done
-		}
-		serverErr <- nil
+		drains.Wait()
+		session.Close()
+		conn.Close()
+		serverErr <- acceptErr
 	}()
 
+	// Match the C# harness: dial + session creation are part of the measurement.
+	start := time.Now()
 	conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
 		return result{}, err
@@ -177,48 +194,61 @@ func runGoYamux(mbs, streams int) (result, error) {
 	config.EnableKeepAlive = false
 	session, err := yamux.Client(conn, config)
 	if err != nil {
+		conn.Close()
 		return result{}, err
 	}
 
-	iterationsPerStream := (totalMB * 1024 * 1024 / dataChunkSize) / streams
 	buf := make([]byte, dataChunkSize)
-
-	start := time.Now()
 	errCh := make(chan error, streams)
 
 	for i := 0; i < streams; i++ {
+		streamIndex := i
 		go func() {
 			stream, err := session.OpenStream()
 			if err != nil {
 				errCh <- err
 				return
 			}
-			for j := 0; j < iterationsPerStream; j++ {
+
+			for j := 0; j < chunksForStream(totalChunks, streams, streamIndex); j++ {
 				if _, err := stream.Write(buf); err != nil {
 					errCh <- err
 					return
 				}
 			}
-			stream.Close()
+
+			if err := stream.Close(); err != nil {
+				errCh <- err
+				return
+			}
+
 			errCh <- nil
 		}()
 	}
 
 	for i := 0; i < streams; i++ {
 		if err := <-errCh; err != nil {
+			conn.Close()
+			session.Close()
 			return result{}, err
 		}
+	}
+
+	// Wait until the receiver has drained every stream so the measurement is
+	// end-to-end rather than "bytes handed to the local send buffer".
+	for i := 0; i < streams; i++ {
+		<-streamDrained
 	}
 	elapsed := time.Since(start)
 
 	conn.Close()
 	session.Close()
 
-	if err := <-serverErr; err != nil {
+	if err := <-serverErr; err != nil && err != yamux.ErrSessionShutdown {
 		return result{}, err
 	}
 
-	mbps := float64(totalMB) / elapsed.Seconds()
+	mbps := float64(mbs) / elapsed.Seconds()
 	return result{
 		Label:    "GoYamux",
 		MBs:      mbs,
@@ -226,10 +256,4 @@ func runGoYamux(mbs, streams int) (result, error) {
 		Duration: elapsed,
 		MBps:     mbps,
 	}, nil
-}
-
-func init() {
-	// Ensure we don't get "too many open files" errors
-	// by keeping the listener port free
-	os.Setenv("GODEBUG", os.Getenv("GODEBUG")+",netdns=go")
 }

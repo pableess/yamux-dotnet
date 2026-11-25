@@ -268,15 +268,16 @@ The benchmark project includes:
 
 | Benchmark | Topology |
 |-----------|----------|
-| `TcpBaselineAsync` | Raw TCP baseline |
-| `TcpYamuxAsync` | C# server → C# client over TCP (server-initiated channels) |
-| `CsharpToCsharpAsync` | C# client → C# server over TCP (mirrors the Go benchmark direction) |
-| `GoIntegrationAsync` | C# client → Go server |
+| `RawTcpAsync` | Raw loopback TCP, one byte stream, both peers in-process |
+| `YamuxInProcAsync` | C# client → C# server over TCP, both peers in-process |
+| `YamuxSplitAsync` | C# client → pre-warmed C# server process |
+| `YamuxToGoAsync` | C# client → pre-warmed Go server process |
 | `MemoryYamuxAsync` | C# ↔ C# over in-memory pipes |
-| `TcpNerdbankAsync` / `MemoryNerdbankAsync` | Nerdbank.Streams comparisons |
+| `TcpNerdbankSplitAsync` | Nerdbank client → pre-warmed Nerdbank server process (v1, v3 @ 256 KB, v3 @ 1 MB) |
+| `MemoryNerdbankAsync` | Nerdbank over in-memory streams (v1, v3 @ 256 KB, v3 @ 1 MB) |
 
 The Go baseline (`GoRawTCP`, `GoYamux`) comes from `benchmarks/go-benchmark`.
-See [Performance](docs/docs/Performance.md) for methodology and tuning guidance.
+See [Performance](docs/docs/Performance.md) for methodology, results, and tuning guidance.
 
 ## Metrics (OpenTelemetry)
 

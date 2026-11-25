@@ -47,11 +47,18 @@ installs Go before running the test suite.
 The benchmark project compares Yamux against raw TCP, Go Yamux, and
 Nerdbank.Streams. It includes:
 
-- `CsharpToCsharpAsync` — C# client → C# server (mirrors the Go direction)
-- `TcpYamuxAsync` — C#↔C# with server-initiated channels
-- `GoIntegrationAsync` — C# client → Go server
+- `RawTcpAsync` — raw loopback TCP, both peers in-process
+- `YamuxInProcAsync` — C# client → C# server, both peers in-process
+- `YamuxSplitAsync` — C# client → pre-warmed C# server process
+- `YamuxToGoAsync` — C# client → pre-warmed Go server process
 - `MemoryYamuxAsync` — C#↔C# over in-memory pipes
-- `TcpNerdbankAsync` / `MemoryNerdbankAsync` — Nerdbank.Streams comparisons
+- `TcpNerdbankSplitAsync` / `MemoryNerdbankAsync` — Nerdbank.Streams v1 (no
+  backpressure), v3 with a 256 KB window (matching yamux), and v3 with its
+  default 1 MB window
+
+Split benchmarks use `benchmarks/Yamux.Benchmark.Server` as a long-lived peer,
+so process startup and JIT are outside the measured method and the
+C#-to-C#, C#-to-Go, and Nerdbank topologies match.
 
 Run the full suite:
 

@@ -1,0 +1,68 @@
+```
+
+BenchmarkDotNet v0.14.0, Fedora Linux 44 (COSMIC)
+AMD Ryzen 5 5600H with Radeon Graphics, 1 CPU, 12 logical and 6 physical cores
+.NET SDK 11.0.100-rc.3.26522.148
+  [Host]     : .NET 10.0.13 (10.0.1326.50504), X64 RyuJIT AVX2
+  Job-PAWVUY : .NET 10.0.13 (10.0.1326.50504), X64 RyuJIT AVX2
+
+IterationCount=8  LaunchCount=1  RunStrategy=Throughput  
+WarmupCount=3  
+
+```
+| Method                | MBs | Streams | Mode           | Mean         | Error         | StdDev       | Gen0       | Gen1      | Gen2    | Allocated    |
+|---------------------- |---- |-------- |--------------- |-------------:|--------------:|-------------:|-----------:|----------:|--------:|-------------:|
+| **TcpNerdbankSplitAsync** | **1**   | **1**       | **NoBackpressure** |   **1,242.2 μs** |      **23.10 μs** |     **10.25 μs** |     **5.8594** |         **-** |       **-** |     **45.82 KB** |
+| MemoryNerdbankAsync   | 1   | 1       | NoBackpressure |     386.4 μs |      11.51 μs |      5.11 μs |    10.7422 |    2.9297 |       - |      90.9 KB |
+| **TcpNerdbankSplitAsync** | **1**   | **1**       | **Window256K**     |   **2,221.8 μs** |      **40.66 μs** |     **21.27 μs** |     **3.9063** |         **-** |       **-** |     **50.03 KB** |
+| MemoryNerdbankAsync   | 1   | 1       | Window256K     |     630.6 μs |     102.52 μs |     53.62 μs |    83.9844 |   11.7188 |       - |    688.18 KB |
+| **TcpNerdbankSplitAsync** | **1**   | **1**       | **Window1M**       |   **2,115.7 μs** |      **25.29 μs** |     **11.23 μs** |     **3.9063** |         **-** |       **-** |     **47.33 KB** |
+| MemoryNerdbankAsync   | 1   | 1       | Window1M       |     596.8 μs |      82.00 μs |     42.89 μs |    83.9844 |   11.7188 |       - |    688.07 KB |
+| **TcpNerdbankSplitAsync** | **1**   | **5**       | **NoBackpressure** |   **1,567.2 μs** |     **150.74 μs** |     **78.84 μs** |    **15.6250** |         **-** |       **-** |    **124.92 KB** |
+| MemoryNerdbankAsync   | 1   | 5       | NoBackpressure |     479.1 μs |      24.31 μs |     12.72 μs |    24.4141 |    1.9531 |       - |    196.34 KB |
+| **TcpNerdbankSplitAsync** | **1**   | **5**       | **Window256K**     |   **2,419.7 μs** |      **82.86 μs** |     **36.79 μs** |    **15.6250** |         **-** |       **-** |    **141.75 KB** |
+| MemoryNerdbankAsync   | 1   | 5       | Window256K     |     836.4 μs |     231.08 μs |    102.60 μs |   105.4688 |   19.5313 |       - |    857.02 KB |
+| **TcpNerdbankSplitAsync** | **1**   | **5**       | **Window1M**       |   **2,700.1 μs** |     **241.64 μs** |    **126.38 μs** |    **15.6250** |         **-** |       **-** |    **141.87 KB** |
+| MemoryNerdbankAsync   | 1   | 5       | Window1M       |     803.8 μs |     204.86 μs |     90.96 μs |   105.4688 |   19.5313 |       - |    854.87 KB |
+| **TcpNerdbankSplitAsync** | **1**   | **20**      | **NoBackpressure** |   **2,123.4 μs** |     **123.49 μs** |     **54.83 μs** |    **42.9688** |    **7.8125** |       **-** |    **353.44 KB** |
+| MemoryNerdbankAsync   | 1   | 20      | NoBackpressure |     690.0 μs |      81.43 μs |     36.16 μs |    66.4063 |    7.8125 |       - |    534.17 KB |
+| **TcpNerdbankSplitAsync** | **1**   | **20**      | **Window256K**     |   **2,953.2 μs** |     **463.93 μs** |    **242.65 μs** |    **46.8750** |    **7.8125** |       **-** |     **430.7 KB** |
+| MemoryNerdbankAsync   | 1   | 20      | Window256K     |   1,056.4 μs |     107.78 μs |     47.86 μs |   175.7813 |   23.4375 |       - |   1415.45 KB |
+| **TcpNerdbankSplitAsync** | **1**   | **20**      | **Window1M**       |   **2,998.3 μs** |     **332.11 μs** |    **173.70 μs** |    **46.8750** |    **7.8125** |       **-** |    **430.34 KB** |
+| MemoryNerdbankAsync   | 1   | 20      | Window1M       |   1,141.7 μs |     186.09 μs |     97.33 μs |   175.7813 |   23.4375 |       - |   1417.16 KB |
+| **TcpNerdbankSplitAsync** | **50**  | **1**       | **NoBackpressure** |  **45,662.5 μs** |   **4,703.63 μs** |  **2,460.09 μs** |          **-** |         **-** |       **-** |    **178.76 KB** |
+| MemoryNerdbankAsync   | 50  | 1       | NoBackpressure |  16,093.8 μs |     373.92 μs |    195.57 μs |    62.5000 |         - |       - |    628.24 KB |
+| **TcpNerdbankSplitAsync** | **50**  | **1**       | **Window256K**     |  **96,013.5 μs** |   **7,143.31 μs** |  **3,736.09 μs** |          **-** |         **-** |       **-** |   **1236.44 KB** |
+| MemoryNerdbankAsync   | 50  | 1       | Window256K     |  26,207.8 μs |     367.69 μs |    192.31 μs |  3937.5000 |  250.0000 |       - |  31671.84 KB |
+| **TcpNerdbankSplitAsync** | **50**  | **1**       | **Window1M**       |  **95,093.2 μs** |   **5,753.11 μs** |  **3,008.99 μs** |          **-** |         **-** |       **-** |   **1210.32 KB** |
+| MemoryNerdbankAsync   | 50  | 1       | Window1M       |  26,196.6 μs |     442.10 μs |    231.23 μs |  3937.5000 |  250.0000 |       - |  31716.36 KB |
+| **TcpNerdbankSplitAsync** | **50**  | **5**       | **NoBackpressure** |  **47,980.3 μs** |   **3,896.44 μs** |  **2,037.92 μs** |    **83.3333** |         **-** |       **-** |    **839.53 KB** |
+| MemoryNerdbankAsync   | 50  | 5       | NoBackpressure |  17,381.9 μs |     281.49 μs |    147.23 μs |   156.2500 |   31.2500 |       - |   1321.69 KB |
+| **TcpNerdbankSplitAsync** | **50**  | **5**       | **Window256K**     |  **98,071.1 μs** |   **7,892.62 μs** |  **4,127.99 μs** |          **-** |         **-** |       **-** |   **1389.55 KB** |
+| MemoryNerdbankAsync   | 50  | 5       | Window256K     |  28,864.9 μs |     469.63 μs |    245.62 μs |  4031.2500 |  468.7500 |       - |  32543.09 KB |
+| **TcpNerdbankSplitAsync** | **50**  | **5**       | **Window1M**       |  **96,818.3 μs** |   **4,438.04 μs** |  **2,321.18 μs** |          **-** |         **-** |       **-** |   **1744.01 KB** |
+| MemoryNerdbankAsync   | 50  | 5       | Window1M       |  28,680.9 μs |     422.82 μs |    221.14 μs |  4031.2500 |  468.7500 |       - |  32549.15 KB |
+| **TcpNerdbankSplitAsync** | **50**  | **20**      | **NoBackpressure** |  **38,165.9 μs** |   **6,377.34 μs** |  **3,335.47 μs** |    **83.3333** |         **-** |       **-** |   **1114.11 KB** |
+| MemoryNerdbankAsync   | 50  | 20      | NoBackpressure |  17,612.8 μs |     164.82 μs |     73.18 μs |   218.7500 |   31.2500 |       - |   1914.14 KB |
+| **TcpNerdbankSplitAsync** | **50**  | **20**      | **Window256K**     |  **98,832.1 μs** |   **9,683.31 μs** |  **5,064.56 μs** |   **250.0000** |         **-** |       **-** |   **2266.25 KB** |
+| MemoryNerdbankAsync   | 50  | 20      | Window256K     |  31,363.0 μs |     542.43 μs |    283.70 μs |  4187.5000 |  250.0000 | 62.5000 |  33497.05 KB |
+| **TcpNerdbankSplitAsync** | **50**  | **20**      | **Window1M**       |  **96,713.8 μs** |   **3,665.37 μs** |  **1,917.06 μs** |   **250.0000** |         **-** |       **-** |   **2203.55 KB** |
+| MemoryNerdbankAsync   | 50  | 20      | Window1M       |  30,508.3 μs |     348.82 μs |    182.44 μs |  4187.5000 |  156.2500 | 62.5000 |  33491.92 KB |
+| **TcpNerdbankSplitAsync** | **500** | **1**       | **NoBackpressure** | **392,963.6 μs** | **185,803.18 μs** | **97,178.66 μs** |          **-** |         **-** |       **-** |   **1392.07 KB** |
+| MemoryNerdbankAsync   | 500 | 1       | NoBackpressure | 169,257.3 μs |   7,063.98 μs |  3,694.60 μs |   500.0000 |         - |       - |   5518.28 KB |
+| **TcpNerdbankSplitAsync** | **500** | **1**       | **Window256K**     | **959,180.8 μs** |  **18,949.89 μs** |  **9,911.16 μs** |  **1000.0000** |         **-** |       **-** |  **10807.14 KB** |
+| MemoryNerdbankAsync   | 500 | 1       | Window256K     | 281,643.7 μs |   9,975.27 μs |  5,217.26 μs | 39000.0000 | 2000.0000 |       - | 316586.36 KB |
+| **TcpNerdbankSplitAsync** | **500** | **1**       | **Window1M**       | **933,381.9 μs** |  **28,673.37 μs** | **14,996.72 μs** |  **1000.0000** |         **-** |       **-** |  **11587.45 KB** |
+| MemoryNerdbankAsync   | 500 | 1       | Window1M       | 277,978.7 μs |  20,783.17 μs | 10,870.00 μs | 39000.0000 | 2000.0000 |       - | 316428.77 KB |
+| **TcpNerdbankSplitAsync** | **500** | **5**       | **NoBackpressure** | **455,792.2 μs** | **171,440.77 μs** | **89,666.84 μs** |          **-** |         **-** |       **-** |   **7396.62 KB** |
+| MemoryNerdbankAsync   | 500 | 5       | NoBackpressure | 194,037.6 μs |  40,296.73 μs | 21,075.97 μs |  1000.0000 |         - |       - |  11624.41 KB |
+| **TcpNerdbankSplitAsync** | **500** | **5**       | **Window256K**     | **979,043.6 μs** |  **42,964.59 μs** | **22,471.31 μs** |  **1000.0000** |         **-** |       **-** |  **12853.84 KB** |
+| MemoryNerdbankAsync   | 500 | 5       | Window256K     | 293,254.8 μs |  14,510.31 μs |  7,589.17 μs | 40000.0000 | 2000.0000 |       - | 323384.66 KB |
+| **TcpNerdbankSplitAsync** | **500** | **5**       | **Window1M**       | **949,253.9 μs** |  **32,271.87 μs** | **14,328.91 μs** |  **2000.0000** |         **-** |       **-** |  **16199.74 KB** |
+| MemoryNerdbankAsync   | 500 | 5       | Window1M       | 296,146.7 μs |   9,868.76 μs |  5,161.55 μs | 40000.0000 | 2000.0000 |       - | 323311.59 KB |
+| **TcpNerdbankSplitAsync** | **500** | **20**      | **NoBackpressure** | **490,190.4 μs** | **155,431.46 μs** | **81,293.66 μs** |          **-** |         **-** |       **-** |   **7681.55 KB** |
+| MemoryNerdbankAsync   | 500 | 20      | NoBackpressure | 173,312.7 μs |   5,710.67 μs |  2,986.79 μs |  1500.0000 |         - |       - |  12147.82 KB |
+| **TcpNerdbankSplitAsync** | **500** | **20**      | **Window256K**     | **932,767.5 μs** |  **53,104.48 μs** | **27,774.67 μs** |  **2000.0000** | **1000.0000** |       **-** |  **16840.77 KB** |
+| MemoryNerdbankAsync   | 500 | 20      | Window256K     | 298,531.4 μs |  19,232.82 μs | 10,059.13 μs | 40000.0000 |         - |       - | 324486.95 KB |
+| **TcpNerdbankSplitAsync** | **500** | **20**      | **Window1M**       | **942,160.5 μs** |  **31,559.20 μs** | **16,506.07 μs** |  **2000.0000** | **1000.0000** |       **-** |  **16992.64 KB** |
+| MemoryNerdbankAsync   | 500 | 20      | Window1M       | 294,257.1 μs |   9,667.99 μs |  4,292.65 μs | 40000.0000 | 1000.0000 |       - | 324418.59 KB |
