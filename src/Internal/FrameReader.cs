@@ -6,6 +6,13 @@ namespace Yamux.Internal;
 
 internal class FrameReader
 {
+    /// <summary>
+    /// Largest payload chunk requested from the channel's input pipe at once.
+    /// The pipe's default segment size is 4 KB; without a size hint a 32 KB
+    /// frame would be read with eight socket receives and eight pipe flushes.
+    /// </summary>
+    private const int MaxPayloadReadSize = 64 * 1024;
+
     private readonly ConnectionReader _reader;
     private readonly ChannelManager _channelManager;
     private readonly PingManager _pingManager;
@@ -194,7 +201,7 @@ internal class FrameReader
                     await channel.WaitForPendingFlushAsync().ConfigureAwait(false);
 
                     var pipeWriter = channel.GetPipeWriter();
-                    var buffer = pipeWriter.GetMemory();
+                    var buffer = pipeWriter.GetMemory((int)Math.Min(remaining, MaxPayloadReadSize));
 
                     if (buffer.Length > remaining)
                     {
