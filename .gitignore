@@ -60,6 +60,7 @@ docs/.lunet/build/
 
 # Benchmark Results
 BenchmarkDotNet.Artifacts/
+benchmarks/results/
 
 # .NET Core
 project.lock.json
